@@ -2,7 +2,7 @@
 import { T } from '../map/format.js';
 import { updatePassCells, nearestPassable, P_CIV } from './nav.js';
 import { M_ALL, M_HUMAN, M_ZOMBIE, M_TURNING, M_CIV, M_ARMED, CIV, ZOMBIE, TURNING, MILITIA, POLICE, ZSUB, CS,
-  damageAgent, removeAgent, spawnAgent, setType, cureAgent, evacuateAgent, armedStats } from './agents.js';
+  damageAgent, removeAgent, spawnAgent, setType, cureAgent, evacuateAgent, armedStats, MILITIA_GROUP } from './agents.js';
 import { ignite } from './fire.js';
 import { buildingInZone } from './zones.js';
 
@@ -316,11 +316,13 @@ export function onBreach(world, k) {
     const picks = [];
     world.query(b.cx, b.cy, F.radius, M_CIV, (i) => { picks.push(i); });
     picks.sort((a, z) => a - z);
+    const owner = (world.zones.comps[k] || {}).owner | 0;
     let n = 0;
     for (const i of picks) {
       if (A.type[i] !== CIV || world.rng.next() >= F.convertFrac) continue;
       setType(world, i, MILITIA);
-      A.hp[i] = F.fighter.hp; A.ammo[i] = F.fighter.ammo; A.state[i] = 1; A.group[i] = -1; A.cd[i] = 0; A.tgt[i] = -1;
+      A.hp[i] = F.fighter.hp; A.ammo[i] = F.fighter.ammo; A.state[i] = 1; A.group[i] = MILITIA_GROUP + b.idx; A.cd[i] = 0; A.tgt[i] = -1;
+      A.owner[i] = owner; A.pc[i] = -1;
       A.home[2 * i] = A.x[i]; A.home[2 * i + 1] = A.y[i];
       n++;
     }
@@ -419,6 +421,7 @@ export function registerStructureCommands(world) {
       const s = cmd.stance === 1 || cmd.stance === 'pursue' || cmd.stance === 'hunt' ? 1 : 0;
       const grp = cmd.b !== undefined ? cmd.b | 0 : cmd.group | 0;
       if (cmd.b !== undefined && w.buildings[grp]) w.buildings[grp].funcState.stance = s ? 'pursue' : 'hold';
+      if (w.orders) w.orders.cancel(grp);
       const A = w.A;
       let n = 0;
       for (let i = 0; i < A.n; i++) if (A.type[i] >= POLICE && A.group[i] === grp) { A.state[i] = s; n++; }

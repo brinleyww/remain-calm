@@ -30,7 +30,7 @@ Sound: tiny WebAudio-synthesised effects only (dry gunfire ticks, thumps, siren 
 
 ### 2.1 Structure
 - A **map** has 3–7 **stages** (`map.levels`), each with a boundary polygon; stage k's boundary contains stage k−1's. Stage 1 is a small district; the last stage is the whole map.
-- Per stage: **PLANNING** (untimed, sim frozen) → press **READY** (Space) → **BATTLE** (real time; pause, 0.5×/1×/2×/4× speeds; building still allowed with remaining money) → **RESULT** (win: badge + stats; loss: debrief with RETRY).
+- Per stage: **PLANNING** (untimed, sim frozen) → press **READY** (Space) → **BATTLE** (real time; pause, 0.5×/1×/2×/4×/8× speeds, where 1× = `sim.baseSpeed` sim seconds per real second; building still allowed with remaining money) → **RESULT** (win: badge + stats; loss: debrief with RETRY).
 - **Next stage** (Enter on the result card): boundary expands, everything the player built **carries over**, the city is restored (buildings, bridges, fires reset), civilians respawn over the whole new boundary, zombies cleared, money cap and SP recomputed for the new stage.
 - **Retry** restores the planning state saved when that stage's planning began (placements, loadout, specials choices).
 
@@ -65,7 +65,9 @@ Sound: tiny WebAudio-synthesised effects only (dry gunfire ticks, thumps, siren 
 - **Gate** (key G): click a wall cell of your zone; makes a `gate.width` gap that civilians and friendly units pass and zombies attack (`gate.hp`). **A zone with no gate cannot be entered** — civilians go to the nearest zone they can reach.
 - **Evac corridor** (key Q): click-drag a box from tail to arrow head; mouse wheel changes width. Cost $30 + area × perM2. Persistent until refunded.
 - **Hold** (key E): click-drag outer radius; inner circle = innerFrac. Cost $20 + area × perM2. Refunding mid-battle gives nothing.
-- **Units** (number keys 1–7 = loadout slots): see `config.units`. Mounts: building (one unit per building; garrison price/range scale with building height; **paint mode** (P) drag over buildings to place on every building swept), ground, water (battleship: water body ≥ minWaterM2), brush (mines/chemical painted per cell), line (spikes/oil drawn), building|bridge (C4; detonate manually from its card or key D). Some unit costs grow with how many you already own (`cost: (world, n) => …`).
+- **Units** (number keys 1–7 = loadout slots): see `config.units`. Mounts: building (one unit per building; garrison price/range scale with building height; **paint mode** (P) drag over buildings to place on every building swept), ground, water (battleship: water body ≥ minWaterM2; boats: see below), brush (mines/chemical painted per cell; water mines on water cells), line (spikes/oil drawn), building|bridge (C4; detonate manually from its card or key D). Some unit costs grow with how many you already own (`cost: (world, n) => …`).
+- **Boats** (`boat: true`, `js/sim/naval.js`): patrol boat, gunboat, rocket barge, evac ferry. Placed on open water; each sails the connected water (plus bridge cells) of the stage it starts on, which must be ≥ its `minWaterM2` inside the stage. Each live boat unit is a commandable vehicle (id 1e7 + unit id) kept in step with its unit on every board change; the unit's mooring is what is saved, and boats return to it at each stage start. Swimmers tear at the hull; a sunk boat is a lost unit. The ferry boards residents on the shore (counted as evacuated) and unloads at a zone on the water or along water that leaves the map.
+- **Troop orders** (battle only): left-drag or click selects own squads (any armed group) and commandable vehicles (boats, APC, tank); Shift adds or drops, double-click takes every squad of that kind on screen. Right-click or M then click = move (squads march as a group down a local flow field into formation slots and hold there), H hunt, K hold, Z back to the nearest own gated zone (boats go back to their mooring and armour to its drop point, so only squads need a zone). Orders are the `order` command; selection is client state only.
 - **Upgrade** (key U, click or drag over units; or the card's Upgrade button): levels 1→5, each level raises one stat per `ups`; cost = base cost × 1.5^(level−1). Upgrade tiers above 2 must be unlocked (campaign); sandbox: all.
 - **Refund** (key X): click one placement, or drag a box → a panel lists counts per type with checkboxes → refund selected.
 - **Undo** Ctrl+Z (planning only, single player): reverts the last placement action.
@@ -92,7 +94,7 @@ Map buildings of kind civic / trade / armory / rescue are specials (hazard = exp
 
 ### 2.7 Modes, progression, meta
 - **Campaign**: 6 fictional cities (generated from fixed seeds, `js/map/campaign.js`), each 4–7 stages. City N+1 unlocks when every stage of city N has bronze or better. Clearing stages unlocks items per `campaign.js` unlock table (units, abilities, upgrade tiers 3–5). Loadout has 7 unit slots.
-- **Free Play**: any map (generated, real-place import, library). Mutators allowed. Uses everything unlocked.
+- **Free Play**: any map (generated, real-place import, library). Mutators allowed. Uses everything unlocked, plus every boat (`FREE_PLAY_ITEMS` in `js/map/campaign.js`); the campaign issues the patrol boat and water mines from the start and the ferry, gunboat and rocket barge later.
 - **Daily Challenge**: a generated city + 2 mutators seeded by the date (YYYYMMDD); best result per day kept.
 - **Sandbox**: unlimited money/SP, everything unlocked, not recorded.
 - **Difficulty**: Normal / Hardcore / Ultra (multipliers in config). On campaign maps Hardcore and Ultra unlock after finishing the campaign; on custom maps they are open from the start.
@@ -109,7 +111,7 @@ Map buildings of kind civic / trade / armory / rescue are specials (hazard = exp
 Deterministic lockstep over WebRTC DataChannel with copy-paste signalling codes (no server; STUN `stun:stun.l.google.com:19302`). Host picks the map. Money and SP split evenly. Each player owns their units/zones/walls; gates only on own walls; can garrison buildings inside a partner's zone but not edit its walls. Partner cursor shown. READY needs both; any board change cancels the other player's READY.
 
 ### 2.10 Controls (rebindable, stored in settings)
-Space READY / pause · `,` `.` slower/faster · B safe zone · N wall · G gate · Q corridor (wheel = width) · E hold · 1–7 loadout units · F1–F8 or Shift+1–8 abilities · Tab loadout · U upgrade · X refund · P paint mode · D detonate selected C4 · V heights · C specials · R ranges · Ctrl+Z undo · Enter close zone / next stage · Esc cancel / pause menu · WASD/arrows pan · drag middle or right mouse to pan · wheel zoom · Home fit stage.
+Space READY / pause · `,` `.` slower/faster · B safe zone · N wall · G gate · Q corridor (wheel = width) · E hold · 1–7 loadout units · F1–F8 or Shift+1–8 abilities · Tab loadout · U upgrade · X refund · P paint mode · D detonate selected C4 · left drag / click select troops (no tool), right-click move them · M / H / K / Z move / hunt / hold / back to zone · V heights · C specials · R ranges · Ctrl+Z undo · Enter close zone / next stage · Esc cancel / pause menu · WASD/arrows pan · drag middle or right mouse to pan · wheel zoom · Home fit stage.
 
 ---------------------------------------------------------------------------------------------------
 ## 3. Architecture
@@ -208,7 +210,8 @@ world.fire         Float32Array coarse grid (cfg.sim.coarse) intensity 0..1
 world.units[]      // owned by COMBAT: { id, type, x, y, b (building idx|-1), bridge, owner, level, paid, hp, hpMax, mag, ammo, reloads, reloadT, cd, kills, alive, … }
 world.projectiles[] // COMBAT pushes { kind: 'tracer'|'shell'|'rocket'|'rail'|'bomb'|'missile', x0,y0, x1,y1, t0, dur } (t in world.t seconds); render interpolates
 world.effects[]    // anyone pushes { kind: 'boom'|'flash'|'gas'|'fireburst'|'collapse'|'splash'|'nuke'|'plane'|'heli'|'drop', x, y, r, t0, dur, x2?, y2? }
-world.vehicles[]   // COMBAT: { id, kind: 'apc'|'bus'|'medevac'|'bulldozer'|'tank'|'heli'|'gunship'|'plane', x, y, heading, hp, hpMax, alive, … }
+world.vehicles[]   // COMBAT: { id, kind: 'apc'|'bus'|'medevac'|'bulldozer'|'tank'|'heli'|'gunship'|'plane'|<boat unit type>, x, y, heading, hp, hpMax, alive,
+                   //   commandable?, order?: { kind, x, y, t, done }, … }
 world.budget { cap, spent }  world.sp { cap, spent }  world.charges { [abilityId]: n }  world.loadout { units:[7 ids], abilities:{id:n} }
 world.stats { civStart, civAlive, civSafe, civEvac, civDead, zombies, turning, killed, killsBy: {key: n}, spentBy: {key: $} }
 // Commands — ALL player actions:
@@ -218,6 +221,7 @@ world.exec({ t: 'zone.add', p, owner }) -> { ok, reason?, id? }    // reasons ar
 //   ready, speed (s), refund.many ({kind:[ids]}), loadout.set ({units, abilities})
 //   COMBAT registers: unit.place (type,x,y), unit.paint (type, cells or path), unit.upgrade (id), unit.refund (id), unit.detonate (id),
 //   ability.use (id, x, y, x2?, y2?), squad.mode (group, mode)
+//   ORDERS (sim/orders.js): order (refs: ['s<group>', 'v<vehicle id>'], kind: 'move'|'hunt'|'hold'|'return', x?, y?)
 world.registerCommand(name, handler(world, cmd) -> result)
 world.registerSystem({ name, update(world, dt), order })  // COMBAT registers its systems; SIM's own run in fixed order
 world.quote(cmd) -> { cost, ok, reason }    // price/validity preview without applying (tools use it for the cursor label)
@@ -252,11 +256,11 @@ const s = new Session(containerEl, { map, mode: 'campaign'|'free'|'daily'|'sandb
                                      onExit(summary), onStageResult(result), openLoadout(world, done) })
 s.start(); s.destroy();
 ```
-The session owns: World + combat install, rAF loop (fixed-step accumulator × speed; cap 8 ticks/frame), renderer, input/tools, HUD, info card, result card, pause menu (Resume / Retry stage / Settings / Quit). It emits results to the shell via callbacks; the shell records progress. `maprender.drawStatic(ctx, map, grid, camera, opts)` and `Camera` are reused by the editor.
+The session owns: World + combat install, rAF loop (fixed-step accumulator × speed × `sim.baseSpeed`; a per-frame sim time budget keeps frames near 50 fps (the top step about 45 fps, so it never runs fewer ticks than the step below), an even tick count per frame chosen from the tick cost averaged over about ten frames, and owed time that does not fit is dropped; the HUD shows the speed reached when it falls short), renderer, input/tools, HUD, info card, result card, pause menu (Resume / Retry stage / Settings / Quit). It emits results to the shell via callbacks; the shell records progress. `maprender.drawStatic(ctx, map, grid, camera, opts)` and `Camera` are reused by the editor.
 
 ### 3.8 SHELL
 `main.js` screens: Title → Campaign (city list on a desk map, stage stamps) / Free Play (Generated · Real place · Library tabs + mutators + difficulty) / Daily / Sandbox / Co-op lobby / Library / Editor / Settings / Achievements / Credits (OSM attribution). Loadout screen (`ui/loadout.js`, also opened in-game via Tab through `openLoadout`): 7 unit slots from unlocked units, ability charges with SP counter, locked items show what unlocks them.
 `meta/progress.js`: `getProgress()`, `recordResult({mapKey, stage, difficulty, pct, badge, lost})`, `isUnlocked(id)`, `unlockAll(flag)`, `getLoadout()/setLoadout()`. `meta/settings.js`: keybinds, volume, popScale (feeds `population.scale`), autoPauseOnOutbreak, showTips, uiScale.
 
 ### 3.9 NET (`js/net/coop.js`)
-`createHost()` / `joinWithCode(code)` → `CoopLink { role, offerCode, acceptAnswer(code), send(msg), onMessage, close }`. Lockstep: commands stamped `tick + INPUT_DELAY(4)`; each tick both peers wait for the other's (possibly empty) command batch; speed/pause are commands; `world.hash()` exchanged every 60 ticks → desync banner.
+`createHost()` / `joinWithCode(code)` → `CoopLink { role, offerCode, acceptAnswer(code), send(msg), onMessage, close }`. Lockstep: commands stamped `tick + INPUT_DELAY(4)`; each tick both peers wait for the other's (possibly empty) command batch; speed/pause are commands; each turn runs speed × `sim.baseSpeed` ticks, spread over the turn's real time within the frame budget; the peer that gets ahead slows its clock, so the slower machine sets the pace; `world.hash()` exchanged every 60 turns → desync banner.

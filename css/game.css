@@ -138,6 +138,12 @@
 .rc-key-note { margin: .3rem 0 0; font-size: var(--fs-0); line-height: 1.3; color: var(--ink-2); }
 .rc-info { min-height: 0; flex: 0 1 auto; overflow-y: auto; scrollbar-width: thin; }
 .rc-info[hidden] { display: none; }
+.rc-army { min-height: 0; flex: 0 1 auto; overflow-y: auto; scrollbar-width: thin; }
+.rc-army[hidden] { display: none; }
+.rc-army-t { width: 100%; font-size: var(--fs-1); margin: .2rem 0 .1rem; }
+.rc-army-t th { font: 600 var(--fs-0)/1.2 var(--font-label); letter-spacing: .12em; text-transform: uppercase; }
+.rc-orders { display: grid; grid-template-columns: 1fr 1fr; gap: .3rem; }
+.rc-orders .btn { justify-content: space-between; padding: .34rem .5rem .3rem; font-size: var(--fs-1); }
 .rc-card { padding: .55rem .7rem .7rem; background: var(--card); }
 .rc-card .card-head { margin: -.55rem -.7rem .35rem; padding: .4rem .7rem .32rem; align-items: center; }
 .rc-card .card-title { font-size: var(--fs-3); line-height: 1.1; overflow-wrap: anywhere; }

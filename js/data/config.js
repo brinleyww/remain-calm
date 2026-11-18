@@ -3,7 +3,8 @@
 // Everything here can be overridden by mutators ("mods"): text lines "path.to.key=value"; later lines win.
 
 export const DEFAULTS = {
-  sim: { dt: 0.05, cell: 4, coarse: 8, hashCell: 8, maxAgents: 250000, civFieldEvery: 1.0, scentEvery: 1.0 },
+  // baseSpeed: sim seconds per real second at the 1x speed step (the steps 0.5x..8x multiply it).
+  sim: { dt: 0.05, cell: 4, coarse: 8, hashCell: 8, maxAgents: 250000, civFieldEvery: 1.0, scentEvery: 1.0, baseSpeed: 2 },
 
   // Nominal population (drives economy) = building footprint m2 * perM2 * kindMul.
   // Spawned civilians = nominal * scale (performance setting), capped by sim.maxAgents.
@@ -100,6 +101,21 @@ export const DEFAULTS = {
     c4:         { mount: 'building|bridge', cost: 500, dmg: 200, splash: 30, bldgDmg: 99999, bridgeDmg: 5000, manual: true, friendly: true, ups: [] },
     spikes:     { mount: 'line', cost: 2, perM: true, slow: 0.4, durability: 400, ups: [] },   // $2 per meter
     oil:        { mount: 'line', cost: 2, perM: true, burnSec: 30, autoIgnite: 5, ups: [] },    // $2 per meter
+    // Boats (boat: true) sail the stage's connected body of water they are placed on, under bridges; minWaterM2 is that
+    // body's area inside the stage. hull = boat HP (swimmers tear at it), size = [length, beam] m, patrolR = patrol
+    // radius around the mooring. Water is never inside a zone, so boats pay the outside price.
+    patrolBoat: { mount: 'water', boat: true, minWaterM2: 3000, cost: (w, n) => 100 + 20 * n, hull: 700, speed: 9, size: [14, 4], patrolR: 140,
+                  dmg: 5, rof: 0.12, range: 90, accuracy: 0.75, ups: [['range', 1.2], ['dmg', 1.5], ['hull', 1.5], ['rof', 1.3]] },
+    gunboat:    { mount: 'water', boat: true, minWaterM2: 8000, cost: (w, n) => 300 + 100 * n, hull: 2000, speed: 5, size: [22, 6], patrolR: 110,
+                  dmg: 45, splash: 10, rof: 3, range: 240, minRange: 25, shellSpeed: 260, mgDmg: 5, mgRof: 0.15, mgRange: 70, accuracy: 0.75,
+                  ups: [['dmg', 1.5], ['range', 1.25], ['hull', 1.5], ['rof', 1.3]] },
+    rocketBarge:{ mount: 'water', boat: true, minWaterM2: 15000, cost: (w, n) => 280 + 120 * n, hull: 1500, speed: 3, size: [26, 9], patrolR: 50,
+                  dmg: 28, splash: 12, rockets: 10, spread: 45, range: 850, minRange: 120, rof: 45, shellSpeed: 220, minCluster: 3,
+                  ups: [['rockets', 1.5], ['dmg', 1.5], ['rof', 0.75], ['range', 1.3]] },
+    ferry:      { mount: 'water', boat: true, minWaterM2: 6000, cost: (w, n) => 200 + 100 * n, hull: 1200, speed: 7, size: [28, 9],
+                  capacity: 60, loadPerSec: 6, loadRadius: 22, searchR: 600, unloadSec: 4,
+                  ups: [['capacity', 1.5], ['speed', 1.25], ['hull', 1.5], ['capacity', 1.5]] },
+    waterMine:  { mount: 'brush', water: true, cost: 12, dmg: 60, splash: 8, trigger: 4, ups: [] },   // painted on water cells
   },
 
   // ---------------- abilities bought with SP (charges) ----------------
@@ -159,7 +175,7 @@ export const DEFAULTS = {
 
   // Campaign unlock schedule: item ids unlocked when the given campaign stage is cleared (bronze+).
   // Free Play / Sandbox use everything that is unlocked (Sandbox: everything).
-  startUnlocked: ['garrison', 'turret', 'mortar', 'sniper', 'paratroopers', 'callToArms', 'airstrike', 'fireBomb'],
+  startUnlocked: ['garrison', 'turret', 'mortar', 'sniper', 'paratroopers', 'callToArms', 'airstrike', 'fireBomb', 'patrolBoat', 'waterMine'],
   loadoutSlots: 7,
 };
 

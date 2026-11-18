@@ -10,6 +10,7 @@ import { getPalette, heightClass, mix, SPECIAL_CODES, FONT_MONO, FONT_LABEL, BUI
 const TILE = 256;
 const IDX = 128;
 const OVERVIEW_MAX = 2048;
+const OV_CHUNK = 256;
 const CHUNK = 200;
 export const SHADOW_X = 0.25, SHADOW_Y = 0.18;          // shadow offset per metre of height (light from the north-west)
 // Shadow length grows linearly up to 24 m of height, then at 40% so towers don't blanket whole blocks.
@@ -484,7 +485,8 @@ class StaticCache {
     if (!rect) {
       this._refreshAlive(null);
       for (const t of this.tiles.values()) t.dirty = true;
-      for (const ov of this.overviews.values()) { ov.full = true; ov.rects.length = 0; }
+      // a drawn overview keeps showing while it is redrawn a chunk at a time
+      for (const ov of this.overviews.values()) { ov.rects.length = 0; if (ov.drawn) ov.todo = ovChunks(ov); else ov.full = true; }
       return;
     }
     this._refreshAlive(rect);
@@ -1053,13 +1055,15 @@ class StaticCache {
 
   // ---------------- overview fallback (whole map, low resolution) ----------------
 
-  _overview() {
+  // Brings the overview up to date within budgetMs of t0 (at least one patch per call): damaged rectangles first,
+  // then the chunks of a whole-sheet refresh nearest (fx, fy) metres. Only a never-drawn overview is drawn at once.
+  _overview(t0 = now(), budgetMs = Infinity, fx = null, fy = null) {
     const st = this.style, m = this.map;
     let ov = this.overviews.get(st.key);
     if (!ov) {
       const s = Math.min(OVERVIEW_MAX / Math.max(m.w, m.h), 2.5);
       const w = Math.max(1, Math.ceil(m.w * s)), h = Math.max(1, Math.ceil(m.h * s));
-      ov = { s, w, h, canvas: makeCanvas(w, h), full: true, rects: [] };
+      ov = { s, w, h, canvas: makeCanvas(w, h), full: true, drawn: false, rects: [], todo: [] };
       this.overviews.set(st.key, ov);
       if (this.overviews.size > 3) this.overviews.delete(this.overviews.keys().next().value);
     }
@@ -1067,21 +1071,43 @@ class StaticCache {
     if (ov.full) {
       this._renderRegion(g, ov.s, 0, 0, ov.w, ov.h);
       ov.full = false;
+      ov.drawn = true;
       ov.rects.length = 0;
-    } else if (ov.rects.length) {
-      for (const r of ov.rects) {
-        const ax = clamp(Math.floor(r[0] * ov.s) - 2, 0, ov.w), ay = clamp(Math.floor(r[1] * ov.s) - 2, 0, ov.h);
-        const bx = clamp(Math.ceil(r[2] * ov.s) + 2, 0, ov.w), by = clamp(Math.ceil(r[3] * ov.s) + 2, 0, ov.h);
-        if (bx <= ax || by <= ay) continue;
-        const tmp = makeCanvas(bx - ax, by - ay);
-        this._renderRegion(tmp.getContext('2d'), ov.s, ax, ay, bx - ax, by - ay);
-        g.setTransform(1, 0, 0, 1, 0, 0);
-        g.clearRect(ax, ay, bx - ax, by - ay);
-        g.drawImage(tmp, ax, ay);
+      ov.todo.length = 0;
+      return ov;
+    }
+    for (let n = 0; ov.rects.length || ov.todo.length; n++) {
+      if (n > 0 && now() - t0 >= budgetMs) break;
+      let px;
+      if (ov.rects.length) {
+        const r = ov.rects.shift();
+        px = [clamp(Math.floor(r[0] * ov.s) - 2, 0, ov.w), clamp(Math.floor(r[1] * ov.s) - 2, 0, ov.h), clamp(Math.ceil(r[2] * ov.s) + 2, 0, ov.w), clamp(Math.ceil(r[3] * ov.s) + 2, 0, ov.h)];
+      } else {
+        let k = 0;
+        if (fx !== null) {
+          let bd = Infinity;
+          const qx = fx * ov.s, qy = fy * ov.s;
+          for (let i = 0; i < ov.todo.length; i++) {
+            const c = ov.todo[i], d = ((c[0] + c[2]) / 2 - qx) ** 2 + ((c[1] + c[3]) / 2 - qy) ** 2;
+            if (d < bd) { bd = d; k = i; }
+          }
+        }
+        px = ov.todo.splice(k, 1)[0];
       }
-      ov.rects.length = 0;
+      this._ovPatch(ov, g, px);
     }
     return ov;
+  }
+
+  _ovPatch(ov, g, [ax, ay, bx, by]) {
+    const w = bx - ax, h = by - ay;
+    if (w <= 0 || h <= 0) return;
+    let tmp = this._ovTmp;
+    if (!tmp || tmp.width < w || tmp.height < h) tmp = this._ovTmp = makeCanvas(Math.max(w, tmp ? tmp.width : 0), Math.max(h, tmp ? tmp.height : 0));
+    this._renderRegion(tmp.getContext('2d'), ov.s, ax, ay, w, h);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(ax, ay, w, h);
+    g.drawImage(tmp, 0, 0, w, h, ax, ay, w, h);
   }
 
   _newTile(bi, tx, ty, key) {
@@ -1110,6 +1136,12 @@ class StaticCache {
 }
 
 const tileKey = (bi, tx, ty) => ((bi + 64) * 8192 + ty) * 8192 + tx;
+
+function ovChunks(ov) {
+  const out = [];
+  for (let y = 0; y < ov.h; y += OV_CHUNK) for (let x = 0; x < ov.w; x += OV_CHUNK) out.push([x, y, Math.min(ov.w, x + OV_CHUNK), Math.min(ov.h, y + OV_CHUNK)]);
+  return out;
+}
 
 export function makeStaticCache(map, grid = null) {
   const c = new StaticCache(map, grid);
@@ -1213,6 +1245,8 @@ export function drawStatic(ctx, map, grid, camera, opts = {}) {
   const ty0 = clamp(Math.floor(wy0 * S / TILE), 0, nty - 1), ty1 = clamp(Math.floor(wy1 * S / TILE), 0, nty - 1);
   const visible = cx1 > cx0 && cy1 > cy0;
   const need = [];
+  const budget = opts.budgetMs ?? cache.budgetMs;
+  const fxm = (wx0 + wx1) / 2, fym = (wy0 + wy1) / 2;
   let missing = false;
   const blit = t => {
     const rr = z / (2 ** (t.bi / 2));
@@ -1229,7 +1263,7 @@ export function drawStatic(ctx, map, grid, camera, opts = {}) {
       else { missing = true; need.push({ key, bi, tx, ty, fresh: true }); }
     }
     if (missing) {
-      const ov = cache._overview();
+      const ov = cache._overview(t0, budget * 0.5, fxm, fym);
       ctx.drawImage(ov.canvas, 0, 0, ov.w, ov.h, mx0, my0, ov.w / ov.s * z, ov.h / ov.s * z);
       if (cache.prevBi !== null && cache.prevBi !== bi) for (const t of cache.tiles.values()) if (t.bi === cache.prevBi && !t.dirty) blit(t);
     }
@@ -1239,9 +1273,9 @@ export function drawStatic(ctx, map, grid, camera, opts = {}) {
     }
     const ccx = (wx0 + wx1) / 2 * S / TILE - 0.5, ccy = (wy0 + wy1) / 2 * S / TILE - 0.5;
     need.sort((a, b) => (b.fresh ? 1 : 0) - (a.fresh ? 1 : 0) || Math.hypot(a.tx - ccx, a.ty - ccy) - Math.hypot(b.tx - ccx, b.ty - ccy));
-    const budget = opts.budgetMs ?? cache.budgetMs;
+    // out-of-date tiles keep showing until a frame has time for them; a missing tile is drawn at least one per frame
     let done = 0;
-    while (need.length && (done === 0 || now() - t0 < budget)) {
+    while (need.length && (now() - t0 < budget || (done === 0 && need[0].fresh))) {
       let t = need.shift();
       if (t.fresh) t = cache._newTile(t.bi, t.tx, t.ty, t.key);
       cache._renderTile(t);
@@ -1264,6 +1298,8 @@ export function drawStatic(ctx, map, grid, camera, opts = {}) {
         }
       }
     }
+    const ovs = cache.overviews.get(cache.style.key);
+    if (ovs && ovs.drawn && (ovs.rects.length || ovs.todo.length) && now() - t0 < budget * 0.5) cache._overview(t0, budget * 0.7, fxm, fym);
     const vis = (tx1 - tx0 + 3) * (ty1 - ty0 + 3);
     cache.maxTiles = Math.max(64, Math.min(Math.ceil(vis * 2.2), 360));
     cache._evict(frame);

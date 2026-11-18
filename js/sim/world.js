@@ -18,13 +18,14 @@ import { initFire, fireSystem, ignite } from './fire.js';
 import { resetMutants, mutantSystem } from './mutants.js';
 import { canAfford, spend, refundPlacement, refundRate, recomputeSpent, costMul, available, abilitySp, registerEconomyCommands } from './economy.js';
 import { beginStage, startBattle, levelSystem, freshStats, placementsHash, badgeFor } from './level.js';
+import { installOrders } from './orders.js';
 
 export { TYPE, TYPE_KEYS, CS, ZSUB, SUB_KEYS, M_CIV, M_ZOMBIE, M_TURNING, M_POLICE, M_MILITIA, M_SOLDIER, M_ARMED, M_HUMAN, M_ALL };
 export const PASS = Object.freeze({ IN: P_IN, CIV: P_CIV, ZOMBIE: P_ZOM, SWIM: P_SWIM, SLOW: P_SLOW, WALL: P_WALL, GATE: P_GATE, WATER: P_WATER });
 export const SYSTEM_ORDER = Object.freeze({ hash: 0, nav: 10, agents: 20, functions: 30, mutants: 40, fire: 50, combat: 60, level: 100 });
 
 // Commands that do not change the board (they never cancel a partner's READY).
-const NON_BOARD = new Set(['ready', 'speed', 'stance.set', 'squad.mode', 'ability.use', 'unit.detonate']);
+const NON_BOARD = new Set(['ready', 'speed', 'stance.set', 'squad.mode', 'ability.use', 'unit.detonate', 'order']);
 const REFUND_CMD = { unit: 'unit.refund', gate: 'gate.remove', corridor: 'corridor.remove', hold: 'hold.remove', wall: 'wall.remove', zone: 'zone.remove' };
 
 export class World {
@@ -71,6 +72,7 @@ export class World {
     registerStructureCommands(this);
     registerEconomyCommands(this);
     this._registerCoreCommands();
+    installOrders(this);
     const sys = (name, update) => this.registerSystem({ name, update, order: SYSTEM_ORDER[name] });
     sys('hash', (w) => rebuildHash(w, (w.tick & 1) === 0));
     sys('nav', (w) => navSystem(w));
@@ -297,6 +299,13 @@ export class World {
     for (const u of this.units) if (u) { mix(hashStr(String(u.type))); mix(Math.round((u.x || 0) * 10)); mix(Math.round((u.y || 0) * 10)); mix(u.level || 0); mix(u.alive === false ? 0 : 1); mix(u.kills || 0); }
     for (const b of this.buildings) if (!b.alive) mix(b.idx);
     mix(Math.round(this.budget.spent * 100)); mix(this.stats.killed); mix(this.stats.civEvac);
+    // vehicles (boats, armour, aircraft): ids are left out because retry does not reset the counter that hands them out
+    for (const v of this.vehicles) {
+      if (!v.alive) continue;
+      mix(hashStr(String(v.kind))); mix(Math.round(v.x * 10)); mix(Math.round(v.y * 10)); mix(Math.round(v.hp || 0)); mix(v.loaded | 0);
+      if (v.order) { mix(hashStr(String(v.order.kind))); mix(v.order.done ? 1 : 0); }
+    }
+    if (this.orders) this.orders.hash(mix);
     return h >>> 0;
   }
 }

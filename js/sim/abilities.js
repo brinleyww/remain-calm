@@ -1,6 +1,6 @@
 // Abilities bought with command points: targeting, unlock timers, delayed delivery, squads and their effects.
 import { clamp } from '../util/geom.js';
-import { CIV, POLICE, MILITIA, SOLDIER, CS, M_CIV, M_ZOMBIE, M_TURNING, M_ARMED, M_ALL } from './agents.js';
+import { CIV, POLICE, MILITIA, SOLDIER, CS, M_CIV, M_ZOMBIE, M_TURNING, M_ARMED, M_ALL, SQUAD_GROUP } from './agents.js';
 import { P_CIV, nearestPassable } from './nav.js';
 import { abilityKey, buildingAt, queueShell, destroyUnit, sound, log } from './combat.js';
 import {
@@ -32,7 +32,7 @@ export const ABILITY_INFO = {
 // Abilities whose payload needs walkable ground at the target.
 const NEEDS_GROUND = new Set(['paratroopers', 'apc', 'bus', 'tank', 'medevac']);
 const PLANE_SPEED = 120;
-const GROUP_BASE = 1 << 24; // squad group ids stay clear of building indices (police stations use their building index)
+const GROUP_BASE = SQUAD_GROUP; // squad group ids stay clear of building indices (police stations use their building index)
 
 export function abilityState(world, id) {
   const a = world.cfg.abilities[id];
@@ -110,7 +110,7 @@ function enlist(world, i, sq, type) {
   const s = world.armedStats(type, sq.group);
   A.group[i] = sq.group; A.owner[i] = sq.owner; A.state[i] = sq.mode === 'guard' ? 0 : 1;
   A.hp[i] = s.hp; A.ammo[i] = s.ammo === undefined || s.ammo === Infinity ? -1 : s.ammo;
-  A.cd[i] = 0; A.tgt[i] = -1; A.timer[i] = 0;
+  A.cd[i] = 0; A.tgt[i] = -1; A.timer[i] = 0; A.pc[i] = -1;
   A.home[2 * i] = A.x[i]; A.home[2 * i + 1] = A.y[i];
   sq.size++;
 }
@@ -321,6 +321,7 @@ function launch(world, id, a, q, owner) {
       for (const i of members) {
         const ang = rng.next() * Math.PI * 2, r = 4 + 10 * Math.sqrt(rng.next());
         rec.members.push([i, A.type[i], A.state[i]]);
+        A.pc[i] = -1;
         A.home[2 * i] = q.x + Math.cos(ang) * r; A.home[2 * i + 1] = q.y + Math.sin(ang) * r; A.state[i] = 0;
       }
       world.combat.rallies.push(rec);
@@ -433,12 +434,15 @@ export function registerAbilityCommands(world) {
   world.registerCommand('squad.mode', {
     quote(w, cmd) {
       const g = cmd.group | 0;
-      if (!w.combat.squads.some((s) => s.group === g) && !squadMembers(w, g)) return fail('No such squad');
+      const sq = w.combat.squads.find((s) => s.group === g);
+      if (!sq && !squadMembers(w, g)) return fail('No such squad');
+      if (w.owners > 1 && sq && sq.owner !== (cmd.owner | 0)) return fail("That is your partner's squad");
       return { ok: true, cost: 0 };
     },
     exec(w, cmd) {
       const g = cmd.group | 0, hunt = cmd.mode === 'hunt' || cmd.mode === 'pursue' || cmd.mode === 1 || cmd.mode === true;
       const A = w.A;
+      if (w.orders) w.orders.cancel(g);
       let n = 0;
       for (let i = 0; i < A.n; i++) if (A.type[i] >= POLICE && A.group[i] === g) { A.state[i] = hunt ? 1 : 0; if (!hunt) { A.home[2 * i] = A.x[i]; A.home[2 * i + 1] = A.y[i]; } n++; }
       for (const s of w.combat.squads) if (s.group === g) s.mode = hunt ? 'hunt' : 'guard';

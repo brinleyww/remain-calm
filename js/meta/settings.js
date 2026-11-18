@@ -22,6 +22,10 @@ export const ACTIONS = [
   { id: 'detonate', label: 'Detonate charge', group: 'Build', shares: ['panRight'] },
   ...[1, 2, 3, 4, 5, 6, 7].map(n => ({ id: 'unit' + n, label: 'Unit slot ' + n, group: 'Units' })),
   ...[1, 2, 3, 4, 5, 6, 7, 8].map(n => ({ id: 'ability' + n, label: 'Ability ' + n, group: 'Abilities' })),
+  { id: 'orderMove', label: 'Move selected troops', group: 'Orders' },
+  { id: 'orderHunt', label: 'Selected troops hunt', group: 'Orders' },
+  { id: 'orderHold', label: 'Selected troops hold', group: 'Orders' },
+  { id: 'orderReturn', label: 'Selected troops back to zone', group: 'Orders' },
   { id: 'viewHeights', label: 'Heights view', group: 'View' },
   { id: 'viewSpecials', label: 'Specials view', group: 'View' },
   { id: 'viewRanges', label: 'Range rings', group: 'View' },
@@ -41,6 +45,7 @@ export const DEFAULT_KEYS = {
   unit1: ['Digit1'], unit2: ['Digit2'], unit3: ['Digit3'], unit4: ['Digit4'], unit5: ['Digit5'], unit6: ['Digit6'], unit7: ['Digit7'],
   ability1: ['F1', 'Shift+Digit1'], ability2: ['F2', 'Shift+Digit2'], ability3: ['F3', 'Shift+Digit3'], ability4: ['F4', 'Shift+Digit4'],
   ability5: ['F5', 'Shift+Digit5'], ability6: ['F6', 'Shift+Digit6'], ability7: ['F7', 'Shift+Digit7'], ability8: ['F8', 'Shift+Digit8'],
+  orderMove: ['KeyM'], orderHunt: ['KeyH'], orderHold: ['KeyK'], orderReturn: ['KeyZ'],
   viewHeights: ['KeyV'], viewSpecials: ['KeyC'], viewRanges: ['KeyR'], fitStage: ['Home'],
   panUp: ['KeyW', 'ArrowUp'], panDown: ['KeyS', 'ArrowDown'], panLeft: ['KeyA', 'ArrowLeft'], panRight: ['KeyD', 'ArrowRight'],
 };

@@ -1,6 +1,6 @@
 // Real-place import: search a place (or load a saved export), set the square on a map, fetch, convert, file it.
 import { searchPlaces, IMPORT_RANGE, OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL, isHugeMap, snapSize, roundCoord } from '../map/osm.js';
-import { cacheList } from '../map/osmcache.js';
+import { cacheList, cacheKey } from '../map/osmcache.js';
 import { mapStats } from '../map/format.js';
 import { saveItem } from '../map/library.js';
 import { getSettings } from '../meta/settings.js';
@@ -52,6 +52,7 @@ export function mountImport(container, { onMap }) {
   name.value = memo.name;
   name.addEventListener('input', () => { memo.name = name.value; name.dataset.auto = '0'; });
   const importBtn = h('button.btn.btn-go', { type: 'button', disabled: true }, 'Fetch map data');
+  const refreshBtn = h('button.btn.btn-ghost', { type: 'button', hidden: true, title: 'Ignore the copy kept in this browser and download the square again' }, 'Download again');
   const cancelBtn = h('button.btn.btn-ghost', { type: 'button', hidden: true }, 'Cancel');
   const where = h('p.tiny.faint.imp-where');
 
@@ -89,14 +90,20 @@ export function mountImport(container, { onMap }) {
         field('Stages', stageSeg.el),
         field('Name', name)),
       where,
-      h('div.btn-row', importBtn, cancelBtn),
+      h('div.btn-row', importBtn, refreshBtn, cancelBtn),
       progress, errBox),
     h('div.imp-right',
       h('div.spread.imp-view-head', viewSeg.el, h('span.tiny.faint.imp-view-hint', 'Drag the square · wheel to zoom')),
       viewBox, factsBox, sourceLine, warnBox, h('div.btn-row.imp-save', saveBtn, saveNote), attribution)));
   const saveRow = container.querySelector('.imp-save');
 
-  let busy = false, ctl = null, searching = false, tick = 0, t0 = 0, lastArgs = null;
+  let busy = false, ctl = null, searching = false, tick = 0, t0 = 0, lastArgs = null, cachedKeys = new Set();
+
+  // A copy of the current square is kept in this browser's cache (Fetch then loads it without downloading).
+  function isCached() {
+    const c = memo.centre;
+    return !!c && !memo.file && cachedKeys.has(cacheKey(roundCoord(c.lat), roundCoord(c.lon), snapSize(memo.size)));
+  }
 
   function setView(v) {
     memo.view = v;
@@ -111,13 +118,16 @@ export function mountImport(container, { onMap }) {
     const c = memo.centre;
     where.textContent = c ? `Square ${memo.size} km around ${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}` : '';
     importBtn.disabled = busy || !c;
+    refreshBtn.hidden = busy || !isCached();
   }
 
   function markStale() {
-    if (!memo.map || !memo.res || memo.file) { importBtn.textContent = 'Fetch map data'; return; }
+    const cached = isCached();
+    refreshBtn.hidden = busy || !cached;
+    if (!memo.map || !memo.res || memo.file) { importBtn.textContent = cached ? 'Load saved copy' : 'Fetch map data'; return; }
     const c = memo.centre;
     const same = c && Math.abs(roundCoord(c.lat) - memo.res.lat) < 1e-9 && Math.abs(roundCoord(c.lon) - memo.res.lon) < 1e-9 && snapSize(memo.size) === memo.res.sizeKm && memo.stages === memo.res.map.levels.length;
-    importBtn.textContent = same ? 'Fetch again' : 'Fetch map data';
+    importBtn.textContent = same ? (cached ? 'Draw again' : 'Fetch again') : cached ? 'Load saved copy' : 'Fetch map data';
   }
 
   // ---------------- search
@@ -175,6 +185,8 @@ export function mountImport(container, { onMap }) {
   async function renderRecent() {
     let list = [];
     try { list = await cacheList(); } catch (e) { list = []; }
+    cachedKeys = new Set(list.map(it => it.key));
+    markStale();
     clear(recentBox);
     if (!list.length) return;
     recentBox.append(h('span.label', 'Fetched before · instant'));
@@ -208,6 +220,7 @@ export function mountImport(container, { onMap }) {
   function setBusy(on) {
     busy = on;
     importBtn.disabled = on || !memo.centre;
+    refreshBtn.hidden = on || !isCached();
     searchBtn.disabled = on;
     fileBtn.disabled = on;
     cancelBtn.hidden = !on;
@@ -297,11 +310,11 @@ export function mountImport(container, { onMap }) {
     ctl = null;
   }
 
-  function doImport() {
+  function doImport(refresh = false) {
     const c = memo.centre;
     if (!c) return;
     const r = memo.results[memo.pick];
-    run({ lat: c.lat, lon: c.lon, sizeKm: snapSize(memo.size), name: name.value.trim() || (r && r.name) || 'Imported place', stages: memo.stages });
+    run({ lat: c.lat, lon: c.lon, sizeKm: snapSize(memo.size), name: name.value.trim() || (r && r.name) || 'Imported place', stages: memo.stages, refresh });
   }
 
   function importFile(file) {
@@ -320,15 +333,16 @@ export function mountImport(container, { onMap }) {
     preview.set(m, 0);
     const stats = mapStats(m);
     const facts = mapFacts(m, stats);
-    const stage1 = stagePopulations(m)[0] || 0;
-    const civ = civEstimate(stats.nominalPop, getSettings().popScale);
+    const popScale = getSettings().popScale;
+    const stage1 = civEstimate(stagePopulations(m)[0] || 0, popScale).n;
+    const civ = civEstimate(stats.nominalPop, popScale);
     facts.append(
       h('div.kv', h('span', 'Stage 1 residents'), h('i'), h('b', fmtInt(stage1))),
       h('div.kv', h('span', 'People simulated, final stage'), h('i'), h('b', fmtInt(civ.n) + (civ.capped ? ' (capped)' : ''))));
     factsBox.appendChild(facts);
     if (res && res.info) {
       const i = res.info;
-      sourceLine.textContent = res.source === 'cache' ? 'From this browser’s cache, fetched earlier.'
+      sourceLine.textContent = res.source === 'cache' ? 'From this browser’s cache, fetched earlier. Download again for fresh data.'
         : res.source === 'file' ? `From ${memo.file ? memo.file.name : 'your file'} (${i.format === 'osm-xml' ? 'OSM XML' : 'Overpass JSON'}).`
           : `Downloaded ${fmtBytes(i.bytes || 0)} from ${(i.mirrors || []).join(', ') || 'the map server'} in ${fmtSec(i.ms || 0)}${i.tiles > 1 ? ` (${i.tiles} parts)` : ''}.`;
       if (i.convertMs !== undefined) sourceLine.textContent += ` Drawn in ${fmtSec(i.convertMs)}.`;
@@ -345,7 +359,8 @@ export function mountImport(container, { onMap }) {
 
   // ---------------- events
   searchForm.addEventListener('submit', (e) => { e.preventDefault(); doSearch(); });
-  importBtn.addEventListener('click', doImport);
+  importBtn.addEventListener('click', () => doImport(false));
+  refreshBtn.addEventListener('click', () => doImport(true));
   cancelBtn.addEventListener('click', () => { if (ctl) ctl.abort(); });
   retryBtn.addEventListener('click', () => { if (lastArgs) run(lastArgs); });
   useFileBtn.addEventListener('click', () => { drop.querySelector('details').open = true; drop.focus(); drop.classList.add('is-flash'); setTimeout(() => drop.classList.remove('is-flash'), 900); });

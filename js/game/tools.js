@@ -3,6 +3,7 @@
 import { pointInPoly, polyPerimeter, clamp, simplify } from '../util/geom.js';
 import { pickBuilding, pickBridge } from '../render/maprender.js';
 import { drawUnitGlyph } from '../render/worldrender.js';
+import { drawWaterBody } from '../render/navalrender.js';
 import { rgba } from '../render/palette.js';
 
 const TAU = Math.PI * 2;
@@ -43,21 +44,19 @@ class Tool {
 }
 
 // ---------------------------------------------------------------- select / inspect
+// Left-drag draws a selection box and clicks pick squads (game/selection.js); right, middle drag and keys pan.
 export class SelectTool extends Tool {
   get name() { return 'select'; }
-  cursor() { return this.drag ? 'grabbing' : 'default'; }
-  down(e) { if (e.button === 0) { this.start = e; this.drag = false; } }
-  move(e) {
-    this.hover = e;
-    if (this.start && e.buttons & 1) {
-      if (!this.drag && Math.hypot(e.sx - this.start.sx, e.sy - this.start.sy) > 4) { this.drag = true; this.last = this.start; }
-      if (this.drag) { this.s.cam.pan(e.sx - this.last.sx, e.sy - this.last.sy); this.last = e; }
-    }
-  }
-  up(e) {
-    if (this.start && !this.drag && e.button === 0) this.s.select(this.s.pickAt(e.sx, e.sy, e.wx, e.wy));
-    this.start = null; this.drag = false;
-  }
+  get drag() { return !!this.s.army.box; }
+  cursor() { return this.s.army.cursor(); }
+  down(e) { if (e.button === 0) this.s.army.down(e); }
+  move(e) { this.hover = e; this.s.army.move(e); }
+  up(e) { if (e.button === 0) this.s.army.up(e); }
+  dbl(e) { this.s.army.dbl(e); }
+  rightClick(e) { return this.s.army.rightClick(e); }
+  key(action) { return action === 'cancel' && this.s.army.cancel(); }
+  label() { return this.s.army.label(); }
+  draw(ctx, cam, pal) { this.s.army.drawBox(ctx, cam, pal); }
 }
 
 // ---------------------------------------------------------------- safe zone polygon
@@ -529,9 +528,15 @@ export class UnitTool extends Tool {
       let x = e.sx, y = e.sy, b = null;
       if (t.b >= 0) { b = this.world.buildings[t.b]; [x, y] = toScreen(cam, b.cx, b.cy); }
       if (t.cmd) {
+        // a boat: tint the whole body of water it would sail (red when it cannot go there)
+        if (this.c.boat && this.q && this.q.comp) drawWaterBody(ctx, this.world, cam, this.q.comp, ok ? pal.carbon : pal.stamp);
         ctx.globalAlpha = 0.85;
         drawUnitGlyph(ctx, this.type, x, y, 7, ok ? pal.ink : pal.stamp, pal.card, { level: 1, angle: -Math.PI / 4 });
         ctx.globalAlpha = 1;
+        if (this.c.boat && this.c.searchR) {
+          ctx.strokeStyle = rgba(ok ? pal.carbon : pal.stamp, 0.7); ctx.lineWidth = 1; ctx.setLineDash([2, 5]);
+          ctx.beginPath(); ctx.arc(x, y, this.c.searchR * cam.zoom, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+        }
         const r = this.s.combat.previewRange(this.world, this.type, b);
         if (r > 0) {
           ctx.strokeStyle = ok ? pal.ink : pal.stamp; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);

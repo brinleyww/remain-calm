@@ -4,11 +4,12 @@
 // Link:   createHost() -> link (link.offerCode) ; joinWithCode(offer) -> link (link.answerCode) ; host: link.acceptAnswer(answer)
 //         link.send(obj) · link.onMessage = fn(obj) · link.sendLarge(tag, text, onProgress) · link.onLarge = fn(tag, text)
 //         link.onState = fn(state) · link.onClose = fn(reason) · link.rtt (ms) · link.close()
-// Driver: new LockstepDriver(world, link, localOwner) · submit(cmd) · advance(realDt) -> world ticks run
+// Driver: new LockstepDriver(world, link, localOwner) · submit(cmd) · advance(realDt, budgetMs) -> world ticks run
 import { encodeShareCode, decodeShareCode, gzipBytes, gunzipBytes } from '../util/compress.js';
 import { hashStr } from '../util/rng.js';
+import { baseSpeed, tickCap, tickCost } from '../game/pacer.js';
 
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 export const INPUT_DELAY = 4;
 export const HASH_EVERY = 60;
 export const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
@@ -356,8 +357,10 @@ export function makeLoopbackPair(opts = {}) {
 
 // Both peers run identical worlds. Time is cut into turns of cfg.sim.dt; a command submitted now is applied
 // on both machines at turn + INPUT_DELAY, after both players' batches for that turn are known (owner 0 first).
-// Each turn runs world.speed world ticks on average (0 while paused, 0.5 = every other turn), so speed and
-// pause are ordinary commands. Commands whose t starts with 'session.' go to onSession instead of world.exec.
+// Each turn runs world.speed * cfg.sim.baseSpeed world ticks on average (0 while paused), so speed and pause are
+// ordinary commands. A turn's ticks are spread over its real time and over as many frames as the sim budget needs.
+// The peer that gets ahead slows its clock (see lead), so the slower machine sets the pace for both.
+// Commands whose t starts with 'session.' go to onSession instead of world.exec.
 export class LockstepDriver {
   constructor(world, link, localOwner, opts = {}) {
     this.world = world;
@@ -368,7 +371,9 @@ export class LockstepDriver {
     this.hashEvery = opts.hashEvery ?? HASH_EVERY;
     this.turnSec = opts.turnSec ?? (world.cfg && world.cfg.sim && world.cfg.sim.dt) ?? 0.05;
     this.maxTurns = opts.maxTurns ?? 8;
-    this.maxSteps = opts.maxSteps ?? 8;
+    this.maxSteps = opts.maxSteps ?? 64;
+    this.clock = opts.clock || clock;
+    this.pace = 1;
     this.turn = 0;
     this.waiting = false;
     this.stallMs = 0;
@@ -382,6 +387,11 @@ export class LockstepDriver {
     this.hashLog = new Map();
     this._acc = 0;
     this._stepAcc = 0;
+    this._owed = 0;
+    this._cost = 0;
+    this._tickMs = 0;
+    this._cap = 0;
+    this._lead = null;
     this._pending = [];
     this._pendingCb = [];
     this._local = new Map();
@@ -416,28 +426,63 @@ export class LockstepDriver {
 
   get partnerTurn() { return this._remoteMax - this.delay; }
 
-  // Advances real time; returns the number of world ticks run (0 while waiting for the partner).
-  advance(realDt) {
+  // Turns this peer is ahead of its partner. Each side sends how far ahead it looks (latency makes both look ahead);
+  // half the difference cancels the latency out.
+  get lead() {
+    if (this._lead === null) return 0;
+    return ((this.turn - 1 - this.partnerTurn) - this._lead) / 2;
+  }
+
+  // Advances real time within budgetMs of sim work; returns the number of world ticks run (0 while waiting for the partner).
+  advance(realDt, budgetMs = Infinity) {
     if (!this.connected) return 0;
-    this._acc += Math.min(Math.max(+realDt || 0, 0), 0.25);
-    let budget = Math.floor(this._acc / this.turnSec + 1e-9);
-    const behind = this.partnerTurn - this.turn;
-    if (behind > 1) budget = Math.max(budget, Math.min(behind, this.maxTurns));
-    budget = Math.min(budget, this.maxTurns);
-    let turns = 0, steps = 0;
+    const real = Math.min(Math.max(+realDt || 0, 0), 0.25);
+    const w = this.world, t0 = this.clock();
+    const lead = this.lead;
+    this.pace = lead > 0.5 ? Math.max(0.15, 1 - 0.6 * (lead - 0.5)) : 1;
+    this._acc += real * this.pace;
+    const catchUp = this._lead === null ? this.partnerTurn - this.turn > 1 : lead < -1.5;
+    const cap = this._cap = Number.isFinite(budgetMs) ? tickCap(this._cap, budgetMs, this._tickMs) : this.maxSteps;
+    let turns = 0, steps = 0, limited = false, spent = 0;
     this.waiting = false;
-    while (turns < budget && steps < this.maxSteps) {
+    for (;;) {
+      if (this._owed > 0) {
+        if (!catchUp && this._acc < this._cost * (1 - 1e-9)) break;
+        if (steps >= Math.min(cap, this.maxSteps) || (steps > 0 && this.clock() - t0 > budgetMs * 1.25)) { limited = true; break; }
+        const s0 = this.clock();
+        w.step();
+        spent += this.clock() - s0;
+        steps++;
+        this._acc -= this._cost;
+        if (--this._owed <= 0 || w.phase !== 'battle') { this._owed = 0; this._endTurn(); }
+        continue;
+      }
+      if (turns >= this.maxTurns) { limited = true; break; }
+      if (!catchUp && this._acc < this._turnNeed()) break;
       if (!this._remote.has(this.turn)) { this.waiting = true; break; }
-      steps += this._runTurn();
+      this._beginTurn();
       turns++;
     }
-    this._acc = Math.max(0, this._acc - turns * this.turnSec);
-    if (this.waiting) { this.stallMs += realDt * 1000; this._acc = Math.min(this._acc, this.turnSec * 2); }
-    else if (turns) this.stallMs = 0;
+    this._tickMs = tickCost(this._tickMs, spent, steps);
+    if (this.waiting) { this.stallMs += real * 1000; this._acc = Math.min(this._acc, this.turnSec); }
+    else if (turns || steps) this.stallMs = 0;
+    // what did not fit is dropped rather than run in a burst later
+    if (limited) this._acc = Math.min(this._acc, this._owed > 0 ? this._cost : this.turnSec);
+    if (this._acc < -this.turnSec) this._acc = -this.turnSec;
     return steps;
   }
 
-  _runTurn() {
+  _ticksPerTurn() { return Math.max(0, this.world.speed) * baseSpeed(this.world.cfg); }
+
+  // Real time the next turn needs before it may start: its first tick, or the whole turn when it has none.
+  _turnNeed() {
+    const w = this.world;
+    const k = w.phase === 'battle' ? Math.floor(this._stepAcc + this._ticksPerTurn() + 1e-9) : 0;
+    return k > 0 ? this.turnSec / k : this.turnSec;
+  }
+
+  // Applies the turn's commands (both players') and works out how many ticks it runs.
+  _beginTurn() {
     const t = this.turn, w = this.world;
     const seal = t + this.delay;
     const batch = this._pending.splice(0);
@@ -445,7 +490,7 @@ export class LockstepDriver {
     const wire = JSON.stringify(batch);
     this._local.set(seal, JSON.parse(wire));
     this._localCb.set(seal, cbs);
-    this.link.send({ $ls: 'in', t: seal, c: batch });
+    this.link.send({ $ls: 'in', t: seal, c: batch, l: t - this.partnerTurn });
 
     const mine = this._local.get(t) || [], theirs = this._remote.get(t) || [];
     const myCbs = this._localCb.get(t) || [];
@@ -467,15 +512,22 @@ export class LockstepDriver {
       }
     }
 
-    let steps = 0;
+    let n = 0;
     if (w.phase === 'battle') {
-      this._stepAcc += Math.max(0, w.speed);
-      let n = Math.floor(this._stepAcc + 1e-9);
+      this._stepAcc += this._ticksPerTurn();
+      n = Math.floor(this._stepAcc + 1e-9);
       this._stepAcc -= n;
-      while (n-- > 0 && w.phase === 'battle') { w.step(); steps++; }
     } else this._stepAcc = 0;
 
     this.turn = t + 1;
+    this._owed = n;
+    if (n > 0) this._cost = this.turnSec / n;
+    else { this._acc -= this.turnSec; this._endTurn(); }
+  }
+
+  // After the turn's last tick: the desync check every hashEvery turns.
+  _endTurn() {
+    const w = this.world;
     if (this.turn % this.hashEvery === 0) {
       const h = w.hash() >>> 0;
       this.hashLog.set(this.turn, { h, tick: w.tick });
@@ -483,7 +535,6 @@ export class LockstepDriver {
       this.link.send({ $ls: 'h', t: this.turn, h, tick: w.tick });
       this._compare(this.turn);
     }
-    return steps;
   }
 
   _onMessage(m) {
@@ -494,6 +545,7 @@ export class LockstepDriver {
       for (const c of m.c) if (c && typeof c === 'object' && typeof c.t === 'string') list.push({ ...c, owner: this.remoteOwner });
       this._remote.set(t, list);
       if (t > this._remoteMax) this._remoteMax = t;
+      if (t === this._remoteMax && Number.isFinite(m.l)) this._lead = m.l;
       return;
     }
     if (m.$ls === 'h') {

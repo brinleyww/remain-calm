@@ -6,6 +6,7 @@ import { hashStr } from '../util/rng.js';
 
 let worker = null, workerBroken = false, seq = 1;
 const jobs = new Map();
+const stale = new Set(); // cancelled imports the worker has not answered yet
 
 function getWorker() {
   if (worker || workerBroken) return worker;
@@ -13,6 +14,7 @@ function getWorker() {
     worker = new Worker(new URL('./gen_worker.js', import.meta.url), { type: 'module' });
     worker.onmessage = (e) => {
       const m = e.data, job = jobs.get(m.id);
+      if (!m.progress) stale.delete(m.id);
       if (!job) return;
       if (m.progress) { if (job.onProgress) job.onProgress(m.progress); return; }
       jobs.delete(m.id);
@@ -40,17 +42,37 @@ async function onMain(op, args, onProgress, signal) {
   throw new Error('Unknown job ' + op);
 }
 
+// A worker stuck in a long synchronous step (drawing an imported map) cannot hear an abort: replace it and
+// hand the other jobs to the new one.
+function restartWorker() {
+  const old = worker;
+  worker = null;
+  stale.clear();
+  if (old) old.terminate();
+  const w = getWorker();
+  for (const [id, job] of jobs) {
+    if (w) w.postMessage({ id, op: job.op, args: job.args });
+    else { jobs.delete(id); job.fallback(); }
+  }
+}
+
 function run(op, args, { onProgress, signal } = {}) {
   const w = getWorker();
   if (!w) return onMain(op, args, onProgress, signal);
   return new Promise((resolve, reject) => {
     const id = seq++;
-    const job = { resolve, reject, onProgress, fallback: () => onMain(op, args, onProgress, signal).then(resolve, reject) };
+    const job = { op, args, resolve, reject, onProgress, fallback: () => onMain(op, args, onProgress, signal).then(resolve, reject) };
     jobs.set(id, job);
     if (signal) signal.addEventListener('abort', () => {
       if (!jobs.has(id)) return;
-      w.postMessage({ op: 'abort', args: { target: id } });
-      if (op !== 'import') { jobs.delete(id); reject(new Error('Cancelled')); }
+      jobs.delete(id);
+      const cur = worker;
+      if (cur) cur.postMessage({ op: 'abort', args: { target: id } });
+      reject(new Error(op === 'import' ? 'Import cancelled' : 'Cancelled'));
+      if (op === 'import' && cur) {
+        stale.add(id);
+        setTimeout(() => { if (stale.has(id) && worker === cur) restartWorker(); }, 400);
+      }
     }, { once: true });
     w.postMessage({ id, op, args });
   });

@@ -5,7 +5,7 @@ import { getItem, saveItem } from '../map/library.js';
 import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL } from '../map/osm.js';
 import { makeConfig } from '../data/config.js';
 import { getSettings } from '../meta/settings.js';
-import { bestRecord, getLoadout, unlockedSet } from '../meta/progress.js';
+import { bestRecord, getLoadout, freePlaySet } from '../meta/progress.js';
 import { ALL_ITEMS } from '../map/campaign.js';
 import { h, append, clear, sfx, fmtInt, fmtMoney, toast, debounce, isTyping, keycap, openModal } from './dom.js';
 import { screenFrame, folderTabs, difficultySeg, segControl, slider, field, stageSeal, DIFF_LABEL } from './screen.js';
@@ -208,7 +208,7 @@ export function mount(root, app, params) {
     if (names.length) estimate.appendChild(h('p.tiny.muted.orders-muts', 'Mutators: ' + names.join(', ')));
     if (civ.n > 40000) estimate.appendChild(h('p.tiny.err-text', 'Heavy simulation: lower the population scale in Settings if it stutters.'));
 
-    const unlocked = memo.sandbox ? new Set(ALL_ITEMS) : unlockedSet();
+    const unlocked = memo.sandbox ? new Set(ALL_ITEMS) : freePlaySet();
     const lo = fitLoadout(getLoadout(), { spCap: memo.sandbox ? Infinity : caps.sp, unlocked, cfg });
     const slots = h('div.lo-mini');
     for (let i = 0; i < (cfg.loadoutSlots || 7); i++) {
@@ -250,7 +250,7 @@ export function mount(root, app, params) {
 
   async function requisition() {
     sfx.page();
-    await app.editLoadout({ map: currentMap(), stage: memo.startStage, cfg: cfgNow(), difficulty: memo.difficulty, sandbox: memo.sandbox });
+    await app.editLoadout({ map: currentMap(), stage: memo.startStage, cfg: cfgNow(), difficulty: memo.difficulty, sandbox: memo.sandbox, free: true });
     updateOrders();
   }
 

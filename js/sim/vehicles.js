@@ -1,15 +1,19 @@
-// Vehicles and aircraft called in by abilities: armour (APC, tank), rescue (bus, medevac), bulldozer, helicopter, gunship.
-// Ground vehicles drive on civilian-passable cells with a windowed A*; aircraft fly straight over everything.
+// Vehicles and aircraft called in by abilities: armour (APC, tank), rescue (bus, medevac), bulldozer, helicopter, gunship;
+// plus the player's boats (js/sim/naval.js). Ground vehicles drive on civilian-passable cells with a windowed A*,
+// boats on their own water, aircraft fly straight over everything.
+// Commandable vehicles (boats, armour) follow v.order = { kind: 'move'|'hunt'|'hold'|'return', x, y, t, done } when set.
 import { T } from '../map/format.js';
 import { clamp } from '../util/geom.js';
 import { ZOMBIE, ZSUB, M_ZOMBIE, M_CIV } from './agents.js';
 import { P_CIV, P_SLOW, nearestPassable, updatePassCells } from './nav.js';
-import { abilityKey, nearestZombie, zombiesNear, pickDirect, pickArty, addClaim, queueShell, sound, log } from './combat.js';
+import { abilityKey, nearestZombie, zombiesNear, pickDirect, pickArty, addClaim, queueShell, destroyUnit, sound, log } from './combat.js';
+import { updateBoat } from './naval.js';
 
 export const GROUND_VEHICLES = new Set(['apc', 'bus', 'bulldozer', 'tank']);
 export const VEHICLE_NAMES = {
   apc: 'Armoured carrier', bus: 'Evacuation bus', medevac: 'Medevac', bulldozer: 'Bulldozer',
   tank: 'Battle tank', heli: 'Attack helicopter', gunship: 'Gunship',
+  patrolBoat: 'Patrol boat', gunboat: 'Gunboat', rocketBarge: 'Rocket barge', ferry: 'Evac ferry',
 };
 const VEH_R = 3; // ground vehicle footprint radius (m)
 
@@ -57,19 +61,33 @@ function hpop() {
   return top;
 }
 
+// Nearest cell (ring search) with one of `bits` in a custom pass array, or -1.
+function nearestIn(pass, g, x, y, bits, maxR) {
+  const cx0 = Math.floor(x / g.cell), cy0 = Math.floor(y / g.cell);
+  for (let r = 0; r <= maxR; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const cx = cx0 + dx, cy = cy0 + dy;
+      if (cx > 0 && cy > 0 && cx < g.gw - 1 && cy < g.gh - 1 && pass[cy * g.gw + cx] & bits) return cy * g.gw + cx;
+    }
+  }
+  return -1;
+}
+
 // Path of fine cells from (sx,sy) toward (tx,ty) over cells with `bits`. If the goal cannot be reached inside the search
 // window/budget, returns the path to the explored cell closest to it. null when the start is boxed in.
-export function findPath(world, sx, sy, tx, ty, bits = P_CIV, maxExp = 40000) {
-  const g = world.grid, gw = g.gw, gh = g.gh, cs = g.cell, pass = world.nav.pass;
+// opt: { pass (custom passability array, default world.nav.pass), margin (window margin in cells), maxWin (cells) }.
+export function findPath(world, sx, sy, tx, ty, bits = P_CIV, maxExp = 40000, opt = null) {
+  const g = world.grid, gw = g.gw, gh = g.gh, cs = g.cell, own = opt && opt.pass, pass = own || world.nav.pass;
   let s = world.cellAt(sx, sy);
-  if (s < 0 || !(pass[s] & bits)) { s = nearestPassable(world, sx, sy, bits, 4); if (s < 0) return null; }
+  if (s < 0 || !(pass[s] & bits)) { s = own ? nearestIn(pass, g, sx, sy, bits, 4) : nearestPassable(world, sx, sy, bits, 4); if (s < 0) return null; }
   const scx = s % gw, scy = (s / gw) | 0;
   let tcx = clamp(Math.floor(tx / cs), 1, gw - 2), tcy = clamp(Math.floor(ty / cs), 1, gh - 2);
-  const M = 40;
+  const M = (opt && opt.margin) || 40, MW = (opt && opt.maxWin) || MAX_WIN;
   let ox = Math.max(1, Math.min(scx, tcx) - M), oy = Math.max(1, Math.min(scy, tcy) - M);
   let ex = Math.min(gw - 2, Math.max(scx, tcx) + M), ey = Math.min(gh - 2, Math.max(scy, tcy) + M);
-  if (ex - ox > MAX_WIN) { if (tcx > scx) { ox = Math.max(1, scx - M); ex = Math.min(gw - 2, ox + MAX_WIN); } else { ex = Math.min(gw - 2, scx + M); ox = Math.max(1, ex - MAX_WIN); } }
-  if (ey - oy > MAX_WIN) { if (tcy > scy) { oy = Math.max(1, scy - M); ey = Math.min(gh - 2, oy + MAX_WIN); } else { ey = Math.min(gh - 2, scy + M); oy = Math.max(1, ey - MAX_WIN); } }
+  if (ex - ox > MW) { if (tcx > scx) { ox = Math.max(1, scx - M); ex = Math.min(gw - 2, ox + MW); } else { ex = Math.min(gw - 2, scx + M); ox = Math.max(1, ex - MW); } }
+  if (ey - oy > MW) { if (tcy > scy) { oy = Math.max(1, scy - M); ey = Math.min(gh - 2, oy + MW); } else { ey = Math.min(gh - 2, scy + M); oy = Math.max(1, ey - MW); } }
   tcx = clamp(tcx, ox, ex); tcy = clamp(tcy, oy, ey);
   const lw = ex - ox + 1, lh = ey - oy + 1;
   pfEnsure(lw * lh);
@@ -131,7 +149,7 @@ export function edgePoint(world, x, y, out = 0) {
 export function addVehicle(world, kind, x, y, props = {}) {
   const C = world.combat;
   const v = {
-    id: C.nextVeh++, kind, x, y, heading: 0, hp: 0, hpMax: 0, alive: true, owner: 0, state: 'active', t0: world.t,
+    id: props.id ?? C.nextVeh++, kind, x, y, heading: 0, hp: 0, hpMax: 0, alive: true, owner: 0, state: 'active', t0: world.t,
     tgt: -1, scanT: 0, cd: 0, path: null, pi: 0, goalX: NaN, goalY: NaN, replanAt: 0, kills: 0, offmap: false,
     ...props,
   };
@@ -144,6 +162,14 @@ export function destroyVehicle(world, v, quiet = false) {
   if (!v.alive) return;
   v.alive = false;
   if (v.pickup) world.removePickup(v.pickup);
+  if (v.boat) {
+    // a sunk boat is a lost unit: gone for good, logged once by destroyUnit
+    if (quiet) return;
+    world.effects.push({ kind: 'splash', x: v.x, y: v.y, r: Math.max(12, v.len || 12), t0: world.t, dur: 1.6 });
+    sound(world, 'explosion', v.x, v.y, 0.7, 2);
+    if (v.unit && v.unit.alive) destroyUnit(world, v.unit, 'sunk');
+    return;
+  }
   if (quiet) return;
   world.effects.push({ kind: 'boom', x: v.x, y: v.y, r: 14, t0: world.t, dur: 1 });
   sound(world, 'explosion', v.x, v.y, 0.8, 1);
@@ -198,7 +224,7 @@ function scratched(world, v, dt) {
   if (v.hp <= 0) destroyVehicle(world, v);
 }
 
-function gunHit(world, v, t, dmg, acc, key) {
+export function gunHit(world, v, t, dmg, acc, key) {
   const A = world.A;
   world.projectiles.push({ kind: 'tracer', x0: v.x, y0: v.y, x1: A.x[t], y1: A.y[t], t0: world.t, dur: 0.06, src: key });
   if (world.rng.next() < acc && world.damageAgent(t, dmg, key)) { v.kills++; return true; }
@@ -207,7 +233,7 @@ function gunHit(world, v, t, dmg, acc, key) {
 }
 
 // A vehicle gun keeps its zombie while it lives in range, else takes one the other guns have not covered.
-function gunTarget(world, v, slot, r, shot) {
+export function gunTarget(world, v, slot, r, shot) {
   const A = world.A;
   let t = v[slot];
   if (t >= 0 && A.type[t] === ZOMBIE) { const dx = A.x[t] - v.x, dy = A.y[t] - v.y; if (dx * dx + dy * dy <= r * r) return t; }
@@ -217,13 +243,13 @@ function gunTarget(world, v, slot, r, shot) {
 }
 
 const SHELL_W = { r: 10, dmg: 0, n: 1, spread: 0, speed: 260, kind: 0, minC: 1, ox: 0, oy: 0 };
-function shellAim(world, v, x, y, minR, maxR, r, dmg, speed) {
+export function shellAim(world, v, x, y, minR, maxR, r, dmg, speed) {
   const W = SHELL_W;
   W.r = r; W.dmg = dmg; W.speed = speed; W.ox = v.x; W.oy = v.y;
   return pickArty(world, x, y, minR, maxR, W);
 }
 
-function cannon(world, v, x, y, dmg, splash, speed, key) {
+export function cannon(world, v, x, y, dmg, splash, speed, key) {
   const ff = world.cfg.friendlyFire, dur = Math.hypot(x - v.x, y - v.y) / speed;
   world.projectiles.push({ kind: 'shell', x0: v.x, y0: v.y, x1: x, y1: y, t0: world.t, dur, src: key });
   queueShell(world, x, y, dur, {
@@ -232,7 +258,7 @@ function cannon(world, v, x, y, dmg, splash, speed, key) {
   });
 }
 
-function loadCivs(world, v, a, dt) {
+export function loadCivs(world, v, a, dt) {
   v.acc = Math.min((v.acc || 0) + a.loadPerSec * dt, 3);
   let got = false;
   while (v.acc >= 1 && v.loaded < a.capacity) {
@@ -262,20 +288,41 @@ function clearRubble(world, x, y, r) {
 }
 
 // ---------------------------------------------------------------- per kind
+const ORDER_KINDS = new Set(['move', 'hunt', 'hold', 'return']);
+
+// The order armour is following, or null once it has none (a finished return hands back to the patrol).
+function armourOrder(v) {
+  const o = v.order;
+  return o && ORDER_KINDS.has(o.kind) && !(o.kind === 'return' && o.done) ? o : null;
+}
+
 function updateArmour(world, v, dt) {
   const a = v.cfg, A = world.A, tank = v.kind === 'tank', key = v.key;
   if (tank) v.cd -= dt;
   v.mgCd = (v.mgCd || 0) - dt;
-  const leash = a.leash || world.cfg.armed.pursueLeash || 300;
+  const leash = a.leash || world.cfg.armed.pursueLeash || 300, o = armourOrder(v);
   if (world.t >= v.scanT) {
     v.scanT = world.t + 0.4;
-    let t = nearestZombie(world, v.x, v.y, Math.max(a.range * 1.6, 150));
-    if (t < 0 || Math.hypot(A.x[t] - v.hx, A.y[t] - v.hy) > leash) t = nearestZombie(world, v.hx, v.hy, leash);
+    let t;
+    if (o) t = nearestZombie(world, v.x, v.y, o.kind === 'hunt' ? 600 : a.range);
+    else {
+      t = nearestZombie(world, v.x, v.y, Math.max(a.range * 1.6, 150));
+      if (t < 0 || Math.hypot(A.x[t] - v.hx, A.y[t] - v.hy) > leash) t = nearestZombie(world, v.hx, v.hy, leash);
+    }
     v.tgt = t;
   }
   let t = v.tgt, d = Infinity;
   if (t >= 0 && A.type[t] !== ZOMBIE) { t = v.tgt = -1; v.scanT = 0; }
-  if (t >= 0) {
+  if (o) {
+    if (o.kind === 'move' && !o.done) {
+      if (v._oRef !== o) { v._oRef = o; v._og = Number.isFinite(+o.x) && Number.isFinite(+o.y) ? landingCell(world, +o.x, +o.y, 20) || [+o.x, +o.y] : null; }
+      if (!v._og || drive(world, v, v._og[0], v._og[1], a.speed, dt) !== 'moving') o.done = true;
+    } else if (o.kind === 'return') {
+      if (drive(world, v, v.hx, v.hy, a.speed, dt) !== 'moving') o.done = true;
+    } else if (o.kind === 'hunt') {
+      if (t >= 0 && Math.hypot(A.x[t] - v.x, A.y[t] - v.y) > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt);
+    } else if (o.kind === 'hold') o.done = true;
+  } else if (t >= 0) {
     d = Math.hypot(A.x[t] - v.x, A.y[t] - v.y);
     if (d > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt);
   } else if (Math.hypot(v.hx - v.x, v.hy - v.y) > 6) drive(world, v, v.hx, v.hy, a.speed, dt);
@@ -448,6 +495,7 @@ export function vehicleSystem(world, dt) {
   for (let k = 0; k < list.length; k++) {
     const v = list[k];
     if (!v.alive) continue;
+    if (v.boat) { if (updateBoat(world, v, dt)) destroyVehicle(world, v); continue; }
     switch (v.kind) {
       case 'apc': case 'tank': updateArmour(world, v, dt); break;
       case 'bus': updateBus(world, v, dt); break;
@@ -466,7 +514,8 @@ export function vehicleSystem(world, dt) {
 
 // Spawners used by abilities. (x, y) is already a valid target.
 export function spawnArmour(world, kind, a, x, y, owner) {
-  const v = addVehicle(world, kind, x, y, { cfg: a, hpMax: a.hp, owner, hx: x, hy: y, key: abilityKey(kind), mgCd: 0 });
+  const v = addVehicle(world, kind, x, y, { cfg: a, hpMax: a.hp, owner, hx: x, hy: y, key: abilityKey(kind), mgCd: 0,
+    commandable: true, selR: kind === 'tank' ? 7 : 6, label: VEHICLE_NAMES[kind] || kind });
   world.effects.push({ kind: 'drop', x, y, r: 10, t0: world.t, dur: 1 });
   return v;
 }

@@ -108,7 +108,7 @@ async function session({ latency, jitter, lagB = 0, ticks = 1200, desync = false
   ok(r.wa.zones.polys.length === 1 && r.wa.holds.length === 1 && r.wa.walls.length === 1 && r.wa.zones.polys[0].owner === 0 && r.wa.holds[0].owner === 1, 'placements carry the right owners');
 }
 {
-  const r = await session({ latency: 2, jitter: 0, ticks: 700, desync: true });
+  const r = await session({ latency: 2, jitter: 0, ticks: 1000, desync: true });
   ok(!!r.desyncInfo && r.desyncInfo.local !== r.desyncInfo.remote, `a corrupted world is reported as a desync (tick ${r.desyncInfo && r.desyncInfo.tick})`);
 }
 console.log(`INPUT_DELAY ${INPUT_DELAY}`);

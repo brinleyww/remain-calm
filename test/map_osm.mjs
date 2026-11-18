@@ -1,5 +1,5 @@
 // node test/map_osm.mjs — osmToMap on synthetic Overpass and OSM XML data, plus the fetch layer on a mocked network.
-import { osmToMap, overpassQuery, areaBBox, specialFromTags, isHugeMap, OSM_ATTRIBUTION } from '../js/map/osm.js';
+import { osmToMap, overpassQuery, areaBBox, specialFromTags, isHugeMap, isPrivateGarden, OSM_ATTRIBUTION } from '../js/map/osm.js';
 import { validateMap, mapStats } from '../js/map/format.js';
 import { pointInPoly } from '../js/util/geom.js';
 
@@ -134,6 +134,23 @@ ok(Math.abs((bb.n - bb.s) * ky - 2000) < 1 && Math.abs((bb.e - bb.w) * kx - 2000
 // empty response still yields a valid (blank) map
 ok(validateMap(osmToMap({ elements: [] }, { lat: 0, lon: 0, sizeKm: 0.5 })).ok, 'empty area still valid');
 
+// back gardens and private yards are open ground, not parks; public gardens still are
+{
+  const g = [];
+  let id = 50000;
+  const area = (pts, tags) => { const geometry = []; for (let i = 0; i < pts.length; i += 2) geometry.push(ll(pts[i], pts[i + 1])); geometry.push(geometry[0]); g.push({ type: 'way', id: id++, geometry, tags }); };
+  area(rect(100, 100, 160, 160), { leisure: 'garden', access: 'private' });
+  area(rect(200, 100, 260, 160), { leisure: 'garden', 'garden:type': 'residential' });
+  area(rect(300, 100, 360, 160), { leisure: 'garden', 'garden:type': 'backyard' });
+  area(rect(400, 100, 500, 200), { leisure: 'garden', 'garden:type': 'botanical', name: 'Botanic Garden' });
+  area(rect(600, 100, 700, 200), { leisure: 'garden', name: 'Rose Garden' });
+  const m3 = osmToMap({ elements: g }, { lat: LAT, lon: LON, sizeKm: 1, name: 'Gardens', stages: 3 });
+  const parkAt = (x, y) => m3.parks.some(pk => pointInPoly(pk.p, x, y));
+  ok(!parkAt(130, 130) && !parkAt(230, 130) && !parkAt(330, 130), 'private, residential and back gardens are not parks');
+  ok(parkAt(450, 150) && parkAt(650, 150) && m3.parks.length === 2, 'public gardens are parks');
+  ok(isPrivateGarden({ leisure: 'garden', access: 'no' }) && !isPrivateGarden({ leisure: 'park', access: 'private' }) && !isPrivateGarden({ leisure: 'garden', access: 'yes' }), 'private garden rule');
+}
+
 // ---------------------------------------------------------------- new paths: files, cache, failover, tiles, cut outlines
 {
   const { parseOsmText, parseOsmXml } = await import('../js/map/osmfile.js');
@@ -220,6 +237,10 @@ ok(validateMap(osmToMap({ elements: [] }, { lat: 0, lon: 0, sizeKm: 0.5 })).ok, 
   ok(r2.source === 'cache' && calls.length === 0 && r2.map.buildings.length === r1.map.buildings.length, 'cache hit on rounded centre and size');
   const cl = await cacheList();
   ok(cl.length === 1 && cl[0].key === cacheKey(LAT, LON, 1) && cl[0].name === 'Mock' && cl[0].bytes > 0, 'cache list entry');
+  calls = [];
+  const r2b = await importPlace({ lat: LAT, lon: LON, sizeKm: 1, name: 'Mock', fetchImpl: mockFetch, refresh: true });
+  const cl2 = await cacheList();
+  ok(r2b.source === 'network' && calls.length > 0 && cl2.length === 1 && cl2[0].t >= cl[0].t, 'refresh downloads again and replaces the cached copy');
 
   // a slow but working best mirror is not abandoned for worse ones
   reset();
@@ -251,6 +272,10 @@ ok(validateMap(osmToMap({ elements: [] }, { lat: 0, lon: 0, sizeKm: 0.5 })).ok, 
   try { await importPlace({ lat: LAT, lon: LON + 0.01, sizeKm: 1, fetchImpl: mockFetch, signal: ctl.signal }); } catch (e) { err = e; }
   await new Promise(r => setTimeout(r, 5));
   ok(err && /cancelled/i.test(err.message) && inflight === 0, 'cancel aborts every request');
+  const ctl2 = new AbortController();
+  err = null;
+  try { await importPlace({ text: JSON.stringify(raw), stages: 3, signal: ctl2.signal, onProgress: p => { if (p.phase === 'convert') ctl2.abort(); } }); } catch (e) { err = e; }
+  ok(err && /cancelled/i.test(err.message), 'cancel during the convert step stops the import');
 
   // nobody answers at all: the last ones are dropped after firstByteMaxMs, no endless wait
   reset();

@@ -8,7 +8,7 @@ export const abilityKey = (id) => 'ability:' + id;
 
 const STAT_KEYS = ['dmg', 'rof', 'mag', 'reloads', 'reloadSec', 'range', 'minRange', 'accuracy', 'splash', 'stunSec', 'fire',
   'rockets', 'spread', 'shells', 'shellSpeed', 'bldgDmg', 'bridgeDmg', 'width', 'hp', 'trigger', 'fireRadius', 'slow',
-  'durability', 'burnSec', 'autoIgnite'];
+  'durability', 'burnSec', 'autoIgnite', 'hull', 'speed', 'capacity'];
 const INT_STATS = new Set(['mag', 'reloads', 'rockets', 'shells']);
 const RESTOCK_SEC = 8;   // a Supply aura restocks an empty turret in this time (before the aura's reload multiplier)
 const SCAN_SEC = 0.25;   // how often an idle weapon looks for a target
@@ -18,6 +18,7 @@ export const STATS_TTL = 20; // ticks a cached stat block stays valid (auras can
 // ---------------------------------------------------------------- definitions and stats
 export function weaponKind(def) {
   if (!def) return 'none';
+  if (def.boat) return 'boat';   // boats fire from their vehicle (js/sim/naval.js)
   if (def.manual) return 'charge';
   if (def.mount === 'line') return def.slow !== undefined ? 'spikes' : 'oil';
   if (def.trigger !== undefined) return 'trap';
@@ -67,6 +68,7 @@ export function unitStats(world, u, auras = true) {
   s.noZoneReload = !!def.noZoneReload;
   s.priority = def.priority || null;
   s.friendly = !!def.friendly;
+  s.wet = !!def.water;
   return s;
 }
 
@@ -189,6 +191,19 @@ export function zombiesNear(world, x, y, r) {
 
 export function nearestZombie(world, x, y, r) {
   return world.counts[ZOMBIE] > 0 && zombiesNear(world, x, y, r) ? world.nearest(x, y, r, M_ZOMBIE) : -1;
+}
+
+// Any zombie within r standing in the water (water mines ignore the ones on the quay or a bridge deck)?
+function wetZombieNear(world, x, y, r) {
+  if (!zombiesNear(world, x, y, r)) return false;
+  const A = world.A, g = world.grid, terr = g.terrain, inv = 1 / g.cell;
+  let hit = false;
+  world.query(x, y, r, M_ZOMBIE, (i) => {
+    if (terr[((A.y[i] * inv) | 0) * g.gw + ((A.x[i] * inv) | 0)] !== T.WATER) return true;
+    hit = true;
+    return false;
+  });
+  return hit;
 }
 
 function refreshMutants(world) {
@@ -762,7 +777,7 @@ function triggerTrap(world, u, s) {
   } else {
     kills = creditKills(world, u.type, () => world.damageArea(x, y, s.splash || 6, s.dmg || 0,
       { src: u.type, friendly: !!ff.auto, wallDmg: (s.dmg || 0) * ff.autoStructureMul }));
-    world.effects.push({ kind: 'boom', x, y, r: (s.splash || 6) * 1.2, t0: world.t, dur: 0.5 });
+    world.effects.push({ kind: s.wet ? 'splash' : 'boom', x, y, r: (s.splash || 6) * 1.2, t0: world.t, dur: s.wet ? 1 : 0.5 });
     sound(world, 'explosion', x, y, 0.4, 2);
   }
   u.kills += kills;
@@ -894,7 +909,7 @@ export function combatSystem(world, dt) {
     } else if (kind === 'trap') {
       if (!anyZ || ((world.tick + u.id) & 1)) continue;
       const s = stats(world, u);
-      if (world.nearest(u.x, u.y, s.trigger || 3, M_ZOMBIE) >= 0) triggerTrap(world, u, s);
+      if (s.wet ? wetZombieNear(world, u.x, u.y, s.trigger || 3) : world.nearest(u.x, u.y, s.trigger || 3, M_ZOMBIE) >= 0) triggerTrap(world, u, s);
     } else if (kind === 'oil') updateOil(world, u, stats(world, u));
   }
   landShells(world);

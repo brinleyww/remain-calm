@@ -31,6 +31,7 @@ const SPOTS = {
   water: { ok: () => WATER, bad: [ROAD, POND, [B1.cx, B1.cy]] },
   brush: { ok: () => ROAD, bad: [[B1.cx, B1.cy], WATER] },
   'building|bridge': { ok: () => [B1.cx, B1.cy], bad: [ROAD, WATER] },
+  wetBrush: { ok: () => WATER, bad: [ROAD, BRIDGE, [B1.cx, B1.cy]] }, // brush units painted on water (water mines)
 };
 for (const type of Object.keys(probe.cfg.units)) {
   const w = mk(['economy.moneyBase=50000']);
@@ -48,7 +49,7 @@ for (const type of Object.keys(probe.cfg.units)) {
     assert(rf.ok && Math.abs(w.budget.spent - (spent - r0.cost)) < 1e-6 && !w.units.length, `${type}: refunded in full during planning`);
     continue;
   }
-  const sp = SPOTS[def.mount];
+  const sp = def.water ? SPOTS.wetBrush : SPOTS[def.mount];
   const [x, y] = sp.ok();
   const before = w.budget.spent;
   const q = w.quote({ t: 'unit.place', type, x, y });

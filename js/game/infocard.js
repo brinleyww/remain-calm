@@ -2,6 +2,7 @@
 import { esc, fmtInt, fmtMoney, setHTML } from './el.js';
 import { KIND_LABEL, KIND_TAG } from '../map/format.js';
 import { HEIGHT_LABELS, heightClass } from '../render/palette.js';
+import { boatCard } from './navalcard.js';
 
 const FUNC_LABEL = { police: 'Police', militia: 'Militia', broadcast: 'Broadcast', radio: 'Radio', budget: 'Budget office', reducedCost: 'Reduced cost',
   repair: 'Repair crews', supply: 'Supply depot', commandPost: 'Command post', medic: 'Medic', airlift: 'Airlift' };
@@ -127,6 +128,7 @@ export class InfoCard {
   _unit(sel) {
     const s = this.s, w = s.world, u = w.units.find((q) => q && q.id === sel.id);
     if (!u || u.alive === false) return '';
+    if ((w.cfg.units[u.type] || {}).boat) return boatCard(this, u, { kv, bar, btn });
     const name = s.combat.unitName(u.type);
     const lv = u.level || 1;
     const notches = Array.from({ length: 5 }, (_, k) => `<i class="${k < lv ? 'on' : ''}"></i>`).join('');

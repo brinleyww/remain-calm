@@ -10,8 +10,9 @@ import {
 } from './combat.js';
 import { registerAbilityCommands, abilitySystem, resetAbilities, abilityState, ABILITY_INFO, squadMembers } from './abilities.js';
 import { vehicleSystem, findPath, VEHICLE_NAMES } from './vehicles.js';
+import { installNaval, canPlaceBoat, unitBlocked, boatStatus, ferryDest, waterOf } from './naval.js';
 
-export { unitStats, unitRange, abilityState, ABILITY_INFO, squadMembers, findPath, VEHICLE_NAMES };
+export { unitStats, unitRange, abilityState, ABILITY_INFO, squadMembers, findPath, VEHICLE_NAMES, unitBlocked, boatStatus, ferryDest, waterOf };
 
 export const UNIT_INFO = {
   garrison: { name: 'Rooftop Garrison', desc: 'Riflemen on a roof. Taller buildings cost more and see further.' },
@@ -30,6 +31,11 @@ export const UNIT_INFO = {
   c4: { name: 'Demolition Charge', desc: 'Wired to a building or bridge. Detonate it by hand to bring it down.' },
   spikes: { name: 'Spike Strip', desc: 'Drawn as a line. Slows the infected until it wears out.' },
   oil: { name: 'Oil Slick', desc: 'Drawn as a line. Ignites a few seconds after the infected step in.' },
+  patrolBoat: { name: 'Patrol Boat', short: 'Patrol Boat', desc: 'Fast launch with a machine gun. Patrols its water and shoots the shore and swimmers.' },
+  gunboat: { name: 'Gunboat', short: 'Gunboat', desc: 'Slow and tough. A deck cannon with splash and a machine gun.' },
+  rocketBarge: { name: 'Rocket Barge', short: 'Rkt Barge', desc: 'A rocket salvo at crowds from the water, then a long reload.' },
+  ferry: { name: 'Evac Ferry', short: 'Ferry', desc: 'Boards residents on the shore and carries them to a zone on the water or out by river.' },
+  waterMine: { name: 'Water Mine', short: 'W. Mines', desc: 'Painted on water. Explodes under the infected in the water.' },
 };
 
 const MAX_LINE_M = 600;
@@ -131,6 +137,7 @@ export function canPlace(world, type, x, y, owner = 0) {
       return fail('Place it on a building or a bridge');
     }
     case 'water': {
+      if (def.boat) return canPlaceBoat(world, type, x, y, c);
       if (terr !== T.WATER) return fail('Place it on open water');
       const area = g.waterBodies.area[g.waterBodies.id[c]] || 0;
       if (area < (def.minWaterM2 || 0)) return fail(`Needs open water of at least ${Math.round(def.minWaterM2).toLocaleString('en-US')} m²`);
@@ -138,7 +145,7 @@ export function canPlace(world, type, x, y, owner = 0) {
       return { ok: true, reason: '', b: -1, bridge: -1, x: r1(x), y: r1(y), cell: c };
     }
     case 'brush': {
-      if (!walkable(world, c)) return fail('Traps go on streets and open ground');
+      if (def.water ? terr !== T.WATER : !walkable(world, c)) return fail(def.water ? 'Water mines go on open water' : 'Traps go on streets and open ground');
       if (C.brushAt.has(c)) return fail('There is already a trap here');
       return { ok: true, reason: '', b: -1, bridge: bridgeAt(world, c), x: cellX, y: cellY, cell: c };
     }
@@ -360,7 +367,7 @@ export function unitAt(world, x, y, r = 6) {
     else if (u.p) d = distToPolyline(u.p, x, y);
     else if (u.bridge >= 0 && kindOf(world, u.type) === 'charge') d = Math.hypot(u.x - x, u.y - y) - 8;
     else if (u.b >= 0) continue;
-    else d = Math.hypot(u.x - x, u.y - y);
+    else d = Math.hypot(u.x - x, u.y - y) - (u.veh ? Math.max(0, u.veh.selR - 4) : 0);
     if (d <= bd) { bd = d; best = u; }
   }
   return best;
@@ -374,7 +381,8 @@ export function unitsInRect(world, x0, y0, x1, y1) {
 // ---------------------------------------------------------------- persistence and stage reset
 function save(world) {
   return world.units.filter((u) => u.alive).map((u) => {
-    const o = { id: u.id, type: u.type, x: u.x, y: u.y, b: u.b, bridge: u.bridge, owner: u.owner, level: u.level, paid: u.paid, base: u.base };
+    // a boat's x, y follow it around; its mooring (hx, hy) is what gets saved
+    const o = { id: u.id, type: u.type, x: u.hx ?? u.x, y: u.hy ?? u.y, b: u.b, bridge: u.bridge, owner: u.owner, level: u.level, paid: u.paid, base: u.base };
     if (u.p) o.p = u.p.slice();
     return o;
   });
@@ -437,6 +445,7 @@ export function installCombat(world) {
   world.registerSystem({ name: 'combat', order: 60, update: (w, dt) => combatSystem(w, dt), reset: (w) => resetStage(w) });
   world.registerSystem({ name: 'support', order: 61, update: (w, dt) => { abilitySystem(w); vehicleSystem(w, dt); } });
   world.registerSerializer('combat', { save, load });
+  installNaval(world);
   world.events.on('collapse', (e) => onCollapse(world, e));
   world.events.on('bridgeDown', (e) => onBridgeDown(world, e));
   resetStage(world);

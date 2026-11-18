@@ -117,6 +117,13 @@ export class CombatApi {
 
   canPlace(world, type, x, y, owner = 0) { return this._call('canPlace', world, type, x, y, owner) || null; }
 
+  // Why a unit cannot be used anywhere on this stage (water units on dry maps), '' when it can.
+  unitBlocked(world, type) { const r = this._call('unitBlocked', world, type); return typeof r === 'string' ? r : ''; }
+
+  // Boat helpers for the info card: status line, water area, and whether a ferry has somewhere to land.
+  boatStatus(world, v) { return this._call('boatStatus', world, v) || ''; }
+  boatWater(world, v) { return +this._call('waterOf', world, v) || 0; }
+
   abilityState(world, id) {
     const s = this._call('abilityState', world, id);
     if (s && typeof s === 'object') return { charges: s.charges | 0, unlockIn: Math.max(0, +s.unlockIn || 0), ready: !!s.ready, ...s };

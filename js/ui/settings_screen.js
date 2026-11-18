@@ -15,9 +15,9 @@ function perfNote(scale) {
   const per10k = Math.round(10000 * scale);
   // measured on the last stage of a 4 km generated city (about 100,000 people at 100%) on a fast desktop
   const tier = scale <= 0.5 ? ['Light', 'Runs well on laptops, but the streets look thin.']
-    : scale <= 1 ? ['Standard', 'The intended crowd: about 100,000 people on a 4 km city. Smooth at 4× on a fast desktop; a laptop may need less.']
-    : scale <= 1.5 ? ['Heavy', 'About 150,000 people on a 4 km city. Smooth at 1× on a fast desktop; 4× drops frames.']
-    : ['Very heavy', `About 200,000 people on a 4 km city (at most ${fmtInt(DEFAULTS.sim.maxAgents)}). Plays at 1× on a fast desktop; fast-forward stalls.`];
+    : scale <= 1 ? ['Standard', 'The intended crowd: about 100,000 people on a 4 km city. Smooth at 1× on a fast desktop; faster steps reach about 2–2.5×. A laptop may need less.']
+    : scale <= 1.5 ? ['Heavy', 'About 150,000 people on a 4 km city. Smooth at 1× on a fast desktop; faster steps fall short.']
+    : ['Very heavy', `About 200,000 people on a 4 km city (at most ${fmtInt(DEFAULTS.sim.maxAgents)}). Plays at 0.5× to 1× on a fast desktop; faster steps fall short.`];
   return { per10k, tier };
 }
 

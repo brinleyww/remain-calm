@@ -16,8 +16,12 @@ export const M_ARMED = M_POLICE | M_MILITIA | M_SOLDIER, M_HUMAN = M_CIV | M_ARM
 export const CS = Object.freeze({ CALM: 0, PANIC: 1, SAFE: 2, HELD: 3, CORRIDOR: 4, BOARDING: 5, EVAC: 6 });
 export const ZSUB = Object.freeze({ NORMAL: 0, EXPLOSIVE: 1, SHIELDED: 2, SWIMMER: 3, GIANT: 4 });
 export const SUB_KEYS = ['normal', 'explosive', 'shielded', 'swimmer', 'giant'];
+// Armed group ids: police officers use their station's building index, a breached zone's militia MILITIA_GROUP + the
+// building index, ability squads SQUAD_GROUP + a counter.
+export const MILITIA_GROUP = 1 << 23, SQUAD_GROUP = 1 << 24;
 
 // ax/ay/pc: a zombie's cached steering point on its flow field and the cell it was worked out from (-1 = none).
+// For armed humans pc is the id of the march order they are walking under (-1 = none, see sim/orders.js).
 const F32 = ['x', 'y', 'vx', 'vy', 'hp', 'timer', 'panic', 'tx', 'ty', 'cd', 'stun', 'shield', 'ax', 'ay'];
 const U8 = ['type', 'sub', 'state', 'owner', 'aux'];
 const I32 = ['group', 'tgt', 'pc'];
@@ -494,6 +498,7 @@ function makeCtx(world, dt) {
     rt: Math.max(1, Math.round((cfg.zombie.retargetSec || 0.5) / dt)),
     giantMul: (cfg.mutation.kinds.giant && cfg.mutation.kinds.giant.wallDpsMul) || 1,
     pits: world.pits, anyFire: world._fireList.length > 0,
+    marches: world.orders && world.orders.recs.size ? world.orders.recs : null,
     safe: 0, panicked: 0, swimmers: 0, shots: 0,
   };
 }
@@ -925,6 +930,37 @@ function updateTurning(W, i) {
 }
 
 // ---------------------------------------------------------------- armed humans
+// A member of a marching squad walks down its order's local field (mr.field, see sim/orders.js) and leaves the march
+// (pc = -1) once it reaches the formation cells or its own slot (home); from there normal guard steering takes it in.
+// Members ahead of the squad's median distance slow down so the squad moves as one group. False = not marching now.
+function marchSteer(W, i, mr, spd) {
+  const F = mr.field;
+  if (!F) { W.VX[i] = 0; W.VY[i] = 0; return true; }
+  const x = W.X[i], y = W.Y[i], hx = W.home[2 * i] - x, hy = W.home[2 * i + 1] - y;
+  if (hx * hx + hy * hy < 36) { W.PC[i] = -1; return false; }
+  let c = ((y * W.inv) | 0) * W.gw + ((x * W.inv) | 0);
+  if (W.aux[i] & PART) c = sideCell(W, c, x, y);
+  const cx = c % W.gw, cy = (c / W.gw) | 0, lw = F.lw, lx = cx - F.ox, ly = cy - F.oy;
+  const inside = lx > 0 && ly > 0 && lx < lw - 1 && ly < F.lh - 1;
+  let l = ly * lw + lx, d0 = inside ? F.dir[l] : 255, ax, ay;
+  if (d0 === 8) { W.PC[i] = -1; return false; }
+  if (d0 < 8) {
+    ax = cx + DX[d0]; ay = cy + DY[d0];
+    const d1 = F.dir[l + DX[d0] + DY[d0] * lw], dd = (d1 - d0) & 7;
+    if (d1 < 8 && (dd <= 1 || dd === 7)) { ax += DX[d1] * 0.5; ay += DY[d1] * 0.5; }
+  } else {
+    // pushed off the field (slid into a cell it does not cover): step back onto the best neighbour
+    let best = -1, bd = 0xFFFFFFFF;
+    if (inside) for (let d = 0; d < 8; d++) { const n = l + DX[d] + DY[d] * lw; if (F.dir[n] <= 8 && F.dist[n] < bd) { bd = F.dist[n]; best = d; } }
+    if (best < 0) { W.PC[i] = -1; W.home[2 * i] = x; W.home[2 * i + 1] = y; return false; }
+    ax = cx + DX[best]; ay = cy + DY[best]; l += DX[best] + DY[best] * lw;
+  }
+  let f = 1;
+  if (mr.med >= 0) { const ahead = mr.med - F.dist[l]; f = ahead > 60 ? 0.15 : ahead > 20 ? 0.6 : ahead < -20 ? 1.15 : 1; }
+  steerTo(W, i, (ax + 0.5) * W.cs, (ay + 0.5) * W.cs, spd * f);
+  return true;
+}
+
 function updateArmed(W, i, t) {
   const world = W.world, dt = W.dt, X = W.X, Y = W.Y, ac = W.armed;
   const x = X[i], y = Y[i];
@@ -936,6 +972,11 @@ function updateArmed(W, i, t) {
   if (W.cd[i] > 0) W.cd[i] -= dt;
   const grp = W.group[i];
   const s = armedStats(world, t, grp);
+  let mr = null;
+  if (W.marches !== null && W.PC[i] >= 0) {
+    mr = W.marches.get(W.PC[i]) || null;
+    if (mr === null || mr.group !== grp) { W.PC[i] = -1; mr = null; }
+  }
   const pursue = W.state[i] === 1;
   const sh = W.sh;
   if ((i + W.tick) % K_ARMED === 0) {
@@ -951,7 +992,8 @@ function updateArmed(W, i, t) {
     }
     const z = W.tgt[i], hx = W.home[2 * i], hy = W.home[2 * i + 1];
     const spd = (ac.speed || 3) * spdVar(i);
-    if (W.ammo[i] === 0) {
+    if (mr !== null && marchSteer(W, i, mr, spd)) { /* walking under a move order */ }
+    else if (W.ammo[i] === 0) {
       const cell = ((y * W.inv) | 0) * W.gw + ((x * W.inv) | 0);
       if (!steerField(W, i, W.civDir, cell, spd)) {
         if (z >= 0) { const dx = x - X[z], dy = y - Y[z], d = Math.sqrt(dx * dx + dy * dy) || 1; W.VX[i] = dx / d * spd; W.VY[i] = dy / d * spd; }
@@ -986,7 +1028,7 @@ function updateArmed(W, i, t) {
   }
   if (W.VX[i] === 0 && W.VY[i] === 0) return;
   const ox = X[i], oy = Y[i], mx = W.VX[i] * dt, my = W.VY[i] * dt;
-  if (moveAgent(W, i, mx, my, P_CIV) >= 0 && W.ammo[i] !== 0 && W.timer[i] <= 0 &&
+  if (moveAgent(W, i, mx, my, P_CIV) >= 0 && W.ammo[i] !== 0 && W.timer[i] <= 0 && (mr === null || W.PC[i] < 0) &&
       (X[i] - ox) * (X[i] - ox) + (Y[i] - oy) * (Y[i] - oy) < 0.09 * (mx * mx + my * my)) {
     const gz = W.tgt[i], pz = pursue && gz >= 0 && W.type[gz] === ZOMBIE;
     const wp = findDetour(W, i, P_CIV, null, pz ? X[gz] : W.home[2 * i], pz ? Y[gz] : W.home[2 * i + 1]);

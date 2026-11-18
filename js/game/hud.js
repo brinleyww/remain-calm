@@ -2,17 +2,17 @@
 import { h, setText, setHTML, toggle, show, esc, fmtInt, fmtMoney, fmtPct, fmtTime } from './el.js';
 import { drawUnitGlyph, drawAgentKey, KEY_KINDS } from '../render/worldrender.js';
 import { drawMinimap, minimapTransform } from '../render/maprender.js';
+import { SPEEDS } from './pacer.js';
 
 const TOOLS = [
   ['zone', 'Safe zone'], ['wall', 'Wall'], ['gate', 'Gate'], ['corridor', 'Corridor'], ['hold', 'Hold point'],
 ];
-const SPEEDS = [0.5, 1, 2, 4];
 const SRC_LABEL = { police: 'Police', militia: 'Militia', soldier: 'Soldiers', fire: 'Fire', explosive: 'Explosive mutants', hazard: 'Hazard blasts',
   collapse: 'Collapses', drown: 'Drowned', explosion: 'Explosions', zombie: 'Infighting', unknown: 'Other' };
 
 const TIPS = {
   'planning:select': 'Ring a crowded block with a safe zone (B), cut a gate in its wall (G), man the tall roofs (1). Space when ready.',
-  'battle:select': 'Space pauses. Abilities unlock over time: F1-F8 or Shift+1-8. Keep building with what is left.',
+  'battle:select': 'Space pauses. Abilities unlock over time: F1-F8 or Shift+1-8. Drag a box round your troops, then right-click to send them.',
   zone: 'Click corners; Enter or the first corner closes it. Overlapping zones merge. Drag a corner to reshape.',
   wall: 'Click points along the line; Enter or double-click finishes. Zombies must break through.',
   gate: 'Click a safe-zone wall. Only gated zones can be entered; zombies attack gates.',
@@ -50,14 +50,14 @@ export class Hud {
     E.pause = h('button', { type: 'button', title: 'Pause / resume', onclick: () => s.togglePause() }, 'Pause');
     E.speed.append(E.pause);
     E.speedBtns = SPEEDS.map((v) => {
-      const b = h('button', { type: 'button', onclick: () => s.setSpeed(v) }, `${v}x`);
+      const b = h('button', { type: 'button', title: `Clock ${v}× (${P('slower')} slower, ${P('faster')} faster)`, onclick: () => s.setSpeed(v) }, `${v}×`);
       E.speed.append(b);
       return b;
     });
     E.real = h('span.rc-real');
     E.menu = h('button.btn.btn-sm', { type: 'button', onclick: () => s.openPause() }, 'Menu ', h('span.keycap', null, 'Esc'));
     E.top = h('header.rc-top', null,
-      h('div.rc-brand', null, h('span.rc-brand-name', null, 'Remain Calm'), h('span.form-no', null, `OCP-7 / ${esc(s.map.name || 'Untitled')}`)),
+      h('div.rc-brand', null, h('span.rc-brand-name', null, 'Remain Calm'), h('span.form-no', null, `OCP-7 / ${s.map.name || 'Untitled'}`)),
       h('div.rc-stagebox', null, E.stage, E.stageLabel),
       E.phase,
       h('div.rc-stats', null, stat('Civilians', E.civ), stat('Safe', E.safe), stat('Infected', E.zom, '.rc-zom'), stat('Clock', E.time)),
@@ -73,6 +73,8 @@ export class Hud {
       return b;
     };
     E.units = h('div.rc-slots');
+    E.navalSec = h('div.rc-sec', { hidden: true }, 'Naval');
+    E.naval = h('div.rc-slots', { hidden: true });
     E.paint = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.togglePaint() }, h('span.rc-tool-name', null, 'Paint'), key('paint'));
     E.loadout = h('button.rc-tool', { type: 'button', onclick: () => s.openLoadout() }, h('span.rc-tool-name', null, 'Loadout'), key('loadout'));
     E.viewH = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleView('height') }, h('span.rc-tool-name', null, 'Heights'), key('viewHeights'));
@@ -82,7 +84,7 @@ export class Hud {
     E.undo = h('button.rc-tool', { type: 'button', onclick: () => s.undo() }, h('span.rc-tool-name', null, 'Undo'), key('undo'));
     E.rack = h('aside.rc-rack.card.flat', null,
       h('div.rc-sec', null, 'Works'), ...TOOLS.map(([n, l]) => toolBtn(n, l)),
-      h('div.rc-sec', null, 'Units'), E.units,
+      h('div.rc-sec', null, 'Units'), E.units, E.navalSec, E.naval,
       h('div.rc-sec', null, 'Orders'), toolBtn('upgrade', 'Upgrade'), toolBtn('refund', 'Refund'), E.paint, E.loadout, E.undo,
       h('div.rc-sec', null, 'View'), E.viewH, E.viewC, E.viewR, E.viewK);
 
@@ -124,6 +126,7 @@ export class Hud {
   rebuildSlots() {
     const s = this.s, w = s.world, E = this.el, pal = s.pal;
     E.units.textContent = '';
+    E.naval.textContent = '';
     E.unitBtns = [];
     const units = (w.loadout.units || []).slice(0, w.cfg.loadoutSlots || 7);
     const n = w.cfg.loadoutSlots || 7;
@@ -141,10 +144,13 @@ export class Hud {
       const b = h('button.rc-slot', { type: 'button', 'data-tool': 'unit:' + type, title: s.combat.unitDesc(type) || s.combat.unitName(type),
         onclick: () => s.setTool(s.toolName === 'unit:' + type ? 'select' : 'unit:' + type) },
       cv, h('span.rc-slot-name', null, s.combat.unitShort(type)), price, count, h('span.keycap', null, s.prefs.keyLabel(act)));
-      b._type = type; b._price = price; b._count = count; b._cv = cv;
-      E.units.append(b);
+      b._type = type; b._price = price; b._count = count; b._cv = cv; b._title = b.title;
+      const uc = w.cfg.units[type] || {};
+      (uc.mount === 'water' || uc.water ? E.naval : E.units).append(b);
       E.unitBtns.push(b);
     }
+    show(E.navalSec, E.naval.childElementCount > 0);
+    show(E.naval, E.naval.childElementCount > 0);
     this.paintGlyphs();
 
     E.abilities.textContent = '';
@@ -242,8 +248,8 @@ export class Hud {
     const sp = s.paused ? 0 : w.speed;
     toggle(E.pause, 'is-on', s.paused);
     E.speedBtns.forEach((b, k) => toggle(b, 'is-on', !s.paused && Math.abs(SPEEDS[k] - w.speed) < 1e-6));
-    const lag = battle && !s.paused && s.realSpeed > 0 && s.realSpeed < w.speed * 0.85;
-    setText(E.real, lag ? `real ${s.realSpeed.toFixed(1)}x` : '');
+    const lag = battle && !s.paused && !!s.speedLag && w.speed > 0;
+    setText(E.real, lag ? `${w.speed}× · running ${s.runningSpeed().toFixed(1)}×` : '');
     toggle(E.real, 'is-lag', lag);
     show(E.paused, battle && s.paused && !s.modalOpen());
 
@@ -269,8 +275,11 @@ export class Hud {
       setText(b._price, c.perM ? `$${pr.cost}/m` : `${pr.from ? 'from ' : ''}$${fmtInt(pr.cost)}`);
       setText(b._count, counts[b._type] ? `x${counts[b._type]}` : '');
       toggle(b, 'is-on', s.toolName === 'unit:' + b._type);
-      b.disabled = !s.combat.ok || over;
-      toggle(b, 'is-broke', !w.sandbox && pr.cost > w.available(s.owner));
+      const why = c.mount === 'water' || c.water ? s.combat.unitBlocked(w, b._type) : '';
+      if (why) setText(b._price, 'no water');
+      if (b.title !== (why || b._title)) b.title = why || b._title;
+      b.disabled = !s.combat.ok || over || !!why;
+      toggle(b, 'is-broke', !!why || (!w.sandbox && pr.cost > w.available(s.owner)));
     }
 
     // abilities

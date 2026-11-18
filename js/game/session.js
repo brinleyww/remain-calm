@@ -17,15 +17,17 @@ import { Input } from './input.js';
 import { makeTool } from './tools.js';
 import { Hud } from './hud.js';
 import { InfoCard } from './infocard.js';
+import { Army } from './selection.js';
 import { showResult } from './results.js';
 import { openRefundPanel } from './refundpanel.js';
 import { showPause, showWelcome, showLoadoutPicker, showQuickSettings, openModal, button } from './overlays.js';
 import { Sfx } from './sfx.js';
 import { h, esc, fmtInt, fmtMoney } from './el.js';
+import { Pacer, SPEEDS, baseSpeed, simBudgetMs } from './pacer.js';
 
-const SPEEDS = [0.5, 1, 2, 4];
-const MAX_TICKS = 8;
-const NO_UNDO = new Set(['ready', 'speed', 'stance.set', 'squad.mode', 'ability.use', 'unit.detonate', 'loadout.set']);
+// Slow motion (nuke flash): a quarter of the chosen speed, never faster than SLOWMO sim seconds per real second.
+const SLOWMO = 0.5;
+const NO_UNDO = new Set(['ready', 'speed', 'stance.set', 'squad.mode', 'ability.use', 'unit.detonate', 'loadout.set', 'order']);
 const LAYOUT = { left: 196, right: 276, top: 52, bottom: 92 };
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
@@ -51,14 +53,15 @@ export class Session {
     this.hover = null;
     this.currentLabel = null;
     this.toolName = 'select';
-    this.acc = 0;
+    this.pacer = new Pacer(0.05);
     this.realSpeed = 0;
+    this.speedLag = false;
     this.rt = performance.now() / 1000;
     this.slowUntil = 0;
     this.cityDirty = false;
     this.partner = null;
-    this.perf = { fps: 0, frameMs: 0, simMs: 0, renderMs: 0, ticks: 0 };
-    this._rs = { t: 0, n: 0 };
+    this.perf = { fps: 0, frameMs: 0, simMs: 0, renderMs: 0, uiMs: 0, budgetMs: 0, ticks: 0 };
+    this._rs = { t: 0, n: 0, want: 0, lag: 0 };
     this._fps = { t: 0, n: 0 };
     this._offs = [];
     this._nukes = new Set();
@@ -208,6 +211,7 @@ export class Session {
     this.hud = new Hud(this, this.root);
     this.info = new InfoCard(this, this.hud.el.info);
     this.info.show(null);
+    this.army = new Army(this);
     this.root.append(this.overlay);
     this.tool = makeTool(this, 'select');
     this.toolName = 'select';
@@ -391,12 +395,23 @@ export class Session {
   }
 
   stepSpeed(d) {
-    const w = this.world;
-    let k = SPEEDS.findIndex((v) => Math.abs(v - w.speed) < 1e-6);
-    if (k < 0) k = 1;
+    const w = this.world, s = w.speed > 0 ? w.speed : this._lastSpeed || 1;
+    let k = 0;
+    for (let i = 1; i < SPEEDS.length; i++) if (Math.abs(SPEEDS[i] - s) < Math.abs(SPEEDS[k] - s)) k = i;
     k = Math.max(0, Math.min(SPEEDS.length - 1, k + d));
     this.setSpeed(SPEEDS[k]);
   }
+
+  // Sim seconds per real second the clock asks for right now (0 when stopped).
+  simRate() {
+    const w = this.world;
+    if (w.phase !== 'battle' || this.paused || this.modalOpen()) return 0;
+    const r = Math.max(0, w.speed) * baseSpeed(w.cfg);
+    return this.rt < this.slowUntil ? Math.min(r * 0.25, SLOWMO) : r;
+  }
+
+  // The speed actually achieved, on the same scale as the speed buttons.
+  runningSpeed() { return this.realSpeed / baseSpeed(this.world.cfg); }
 
   retry() {
     if (this.driver && !this._fromNet) { this.issue({ t: 'session.retry' }); return; }
@@ -438,7 +453,7 @@ export class Session {
     this.undoStack = [];
     this.paused = false;
     this.slowUntil = 0;
-    this.acc = 0;
+    this.pacer.reset();
     this.markers.clear();
     this.select(null);
     this.setTool('select');
@@ -613,6 +628,7 @@ export class Session {
       return toggleTool('unit:' + type);
     }
     if (/^ability[1-8]$/.test(name)) { this.pickAbility(this.abilityOrder()[+name.slice(7) - 1]); return true; }
+    if (this.army && this.army.handles(name)) return this.army.action(name);
     switch (name) {
       case 'ready': this.ready(); return true;
       case 'slower': this.stepSpeed(-1); return true;
@@ -775,7 +791,7 @@ export class Session {
       const br = w.bridges[t.id];
       return br ? `<p class="tooltip-title">${esc((this.map.roads[t.road] || {}).name || 'Bridge')}</p>${kv('Structural integrity', `${Math.round(br.hp / br.hpMax * 100)}%`)}${kv('Span', `${Math.round(br.len)} m`)}` : '';
     }
-    if (t.kind === 'squad') return `<p class="tooltip-title">Armed group</p>${kv('Click', 'orders')}`;
+    if (t.kind === 'squad') return `<p class="tooltip-title">Armed group</p>${kv('Click', 'select')}${kv('Right-click', 'move there')}`;
     if (t.kind === 'gate') { const g = w.zones.gates.find((q) => q.id === t.id); return g ? `<p class="tooltip-title">Gate</p>${kv('Integrity', `${Math.round(g.hp / g.hpMax * 100)}%`)}` : ''; }
     if (t.kind === 'corridor') return '<p class="tooltip-title">Evac corridor</p>';
     if (t.kind === 'hold') return '<p class="tooltip-title">Hold point</p>';
@@ -822,12 +838,15 @@ export class Session {
     this.last = now;
     this.rt = now / 1000;
     try {
-      this.tick(real);
+      const f0 = performance.now();
+      const simMs = this.tick(real);
       const t0 = performance.now();
       this.render();
-      this.perf.renderMs = this.perf.renderMs * 0.9 + (performance.now() - t0) * 0.1;
+      const t1 = performance.now();
+      this.perf.renderMs = this.perf.renderMs * 0.9 + (t1 - t0) * 0.1;
       this.hud.frame(real);
       this.info.frame(real);
+      this.perf.uiMs = this.perf.uiMs * 0.9 + Math.max(0, performance.now() - f0 - (t1 - t0) - simMs) * 0.1;
     } catch (e) {
       console.error('[session] frame failed', e);
       this._errors = (this._errors || 0) + 1;
@@ -842,30 +861,36 @@ export class Session {
     this.cam.update(real);
     if (this.expand) this.expand.update(real);
     this.input.update(real);
-    let steps = 0;
-    const t0 = performance.now();
+    let steps = 0, want = 0;
+    const t0 = performance.now(), dt = w.cfg.sim.dt;
+    const budget = this.perf.budgetMs = simBudgetMs(this.perf.renderMs, this.perf.uiMs, w.speed >= SPEEDS[SPEEDS.length - 1]);
     if (this.driver) {
-      steps = this.driver.advance(real);
+      steps = this.driver.advance(real, budget);
       this.paused = w.speed <= 0;
-    } else if (w.phase === 'battle' && !this.paused && !this.modalOpen()) {
-      const slow = this.rt < this.slowUntil ? 0.25 : 1;
-      const dt = w.cfg.sim.dt;
-      this.acc += real * w.speed * slow;
-      while (this.acc >= dt && steps < MAX_TICKS) {
-        w.step();
-        this.acc -= dt;
-        steps++;
-        if (w.phase !== 'battle') { this.acc = 0; break; }
-      }
-      if (this.acc > dt) this.acc = dt * 0.999;
-    } else this.acc = 0;
+      if (w.phase === 'battle' && w.speed > 0) want = real * w.speed * baseSpeed(w.cfg);
+    } else {
+      const rate = this.simRate();
+      this.pacer.dt = dt;
+      if (rate > 0) steps = this.pacer.run(real, rate, budget, () => { w.step(); return w.phase === 'battle'; });
+      else this.pacer.reset();
+      want = real * rate;
+    }
+    const simMs = performance.now() - t0;
     this.fxT = w.phase === 'won' || w.phase === 'lost' ? (this.fxT || 0) + real : 0;
-    if (steps) this.perf.simMs = this.perf.simMs * 0.8 + (performance.now() - t0) / steps * 0.2;
+    if (steps) this.perf.simMs = this.perf.simMs * 0.8 + simMs / steps * 0.2;
     this.perf.ticks += steps;
+    // Achieved vs asked-for clock over 0.75 s windows; speedLag only after two short windows in a row.
+    const rs = this._rs;
     if (w.phase === 'battle' && !this.paused && !this.modalOpen()) {
-      this._rs.t += real; this._rs.n += steps;
-      if (this._rs.t >= 0.75) { this.realSpeed = this._rs.n * w.cfg.sim.dt / this._rs.t; this._rs.t = 0; this._rs.n = 0; }
-    } else { this._rs.t = 0; this._rs.n = 0; this.realSpeed = 0; }
+      rs.t += real; rs.n += steps; rs.want += want;
+      if (rs.t >= 0.75) {
+        this.realSpeed = rs.n * dt / rs.t;
+        const ratio = rs.want > 0 ? rs.n * dt / rs.want : 1;
+        if (ratio < 0.9) rs.lag += rs.t; else if (ratio > 0.95) rs.lag = 0;
+        this.speedLag = rs.lag >= 1.4;
+        rs.t = 0; rs.n = 0; rs.want = 0;
+      }
+    } else { rs.t = 0; rs.n = 0; rs.want = 0; rs.lag = 0; this.realSpeed = 0; this.speedLag = false; }
     this.markers.prune(this.rt);
     this._hv = (this._hv || 0) + real;
     if (this._hv > 0.06) { this._hv = 0; this.updateHover(); }
@@ -876,6 +901,7 @@ export class Session {
       const m = this.input.mouse;
       if (this._curT > 0.1 && m) { this._curT = 0; try { this.driver.sendPeer({ k: 'cur', x: Math.round(m.wx), y: Math.round(m.wy), tool: this.toolName }); } catch (e) { /* link down */ } }
     }
+    return simMs;
   }
 
   render() {
@@ -885,10 +911,12 @@ export class Session {
     const ex = this.expand && this.expand.active ? this.expand : null;
     drawStatic(ctx, this.map, w.grid, cam, { palette: pal, view: this.view, stageMask: ex ? ex.mask() : w.region.poly, stageLine: !ex || ex.lineDone, budgetMs: ex ? 3 : undefined, world: w, hover: hb });
     const live = w.phase === 'battle' && !this.paused && !this.modalOpen();
-    const ext = live ? (this.driver ? 0 : this.acc) : 0;
+    const ext = live ? (this.driver ? 0 : this.pacer.acc) : 0;
     const t = w.t + ext + (this.fxT || 0);
     const flash = this.wr.draw(ex ? ex.beginWorld(ctx) : ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: this.hover, abilityName: (id) => this.combat.abilityName(id) });
     if (ex) ex.endWorld(ctx);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.army.draw(ctx, cam, pal);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.markers.draw(ctx, cam, t, this.rt, pal);
     (this.input.gesture || this.tool).draw(ctx, cam, pal);

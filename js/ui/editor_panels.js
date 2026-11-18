@@ -340,11 +340,12 @@ export function shortcutsDialog(root) {
 // Resolves to { map, libId? } or null when cancelled.
 export function startDialog(root, opts = {}) {
   return new Promise(resolve => {
-    let done = false;
-    const finish = v => { if (done) return; done = true; m.close(); resolve(v); };
+    let done = false, importer = null;
+    const dropImporter = () => { if (importer) { importer.destroy(); importer = null; } };
+    const finish = v => { if (done) return; done = true; dropImporter(); m.close(); resolve(v); };
     const err = el('div', { class: 'error ed-start-error', role: 'alert' });
     const fail = e => { err.textContent = e && e.message ? e.message : String(e); };
-    const tabs = [['blank', 'Blank sheet'], ['gen', 'Generate'], ['open', 'Open']];
+    const tabs = [['blank', 'Blank sheet'], ['gen', 'Generate'], ['osm', 'Real place'], ['open', 'Open']];
     let tab = opts.tab || 'blank';
     const body = el('div', { class: 'ed-start' });
     const tabBar = el('div', { class: 'tabs', role: 'tablist' });
@@ -441,16 +442,31 @@ export function startDialog(root, opts = {}) {
         field('Map file', file, 'A .rcmap.json export.'), field('Share code', code), el('div', { class: 'hstack' }, btn('Open code', fromCode, 'btn', { dataset: { act: 'code-go' } })));
     };
 
+    // The same real-place finder as Free Play: search, square picker, mirrors, cache and .osm / Overpass files.
+    const osmForm = () => {
+      const box = el('div', { class: 'ed-osm' }, el('p', { class: 'small muted', text: 'Opening the place finder…' }));
+      let picked = null;
+      const go = btn('Draft from this place', () => { if (picked) finish({ map: picked }); }, 'btn btn-go', { dataset: { act: 'osm-go' }, disabled: true });
+      import('./import.js').then(mod => {
+        if (done || tab !== 'osm' || !box.isConnected) return;
+        box.replaceChildren();
+        importer = mod.mountImport(box, { onMap: map => { picked = map || null; go.disabled = !picked; } });
+      }).catch(fail);
+      return el('div', { class: 'vstack gap-3' }, box, el('div', { class: 'hstack' }, go));
+    };
+
     const show = id => {
+      dropImporter();
       tab = id;
       err.textContent = '';
+      m.el.querySelector('.modal').classList.toggle('ed-modal-xl', id === 'osm');
       tabBar.replaceChildren(...tabs.map(([t, txt], i) => el('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': String(t === tab), dataset: { tab: t }, onclick: () => show(t) },
         el('span', { class: 'tab-no', text: String(i + 1).padStart(2, '0') }), txt)));
-      folder.replaceChildren(id === 'blank' ? blankForm() : id === 'gen' ? genForm() : openForm());
+      folder.replaceChildren(id === 'blank' ? blankForm() : id === 'gen' ? genForm() : id === 'osm' ? osmForm() : openForm());
     };
     body.append(el('div', { class: 'folder' }, tabBar, folder), err);
     const m = modal(root, 'New drafting sheet', body, [btn(opts.cancelText || 'Cancel', () => finish(null), 'btn btn-ghost')],
-      { wide: true, onClose: () => { if (!done) { done = true; resolve(null); } } });
+      { wide: true, onClose: () => { if (!done) { done = true; dropImporter(); resolve(null); } } });
     show(tab);
   });
 }

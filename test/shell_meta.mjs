@@ -52,6 +52,8 @@ S.resetSettings();
 P.resetProgress();
 ok(P.cityUnlocked('millbrook') && !P.cityUnlocked('port-ashby'), 'only first city open');
 ok(!P.isUnlocked('spikes') && P.isUnlocked('garrison'), 'start items');
+ok(P.isUnlocked('patrolBoat') && !P.isUnlocked('gunboat') && !P.isUnlocked('ferry') && !P.isUnlocked('rocketBarge'), 'campaign starts with the patrol boat only');
+ok(['gunboat', 'ferry', 'rocketBarge', 'patrolBoat', 'waterMine'].every(id => P.freePlaySet().has(id)) && !P.freePlaySet().has('spikes'), 'free play has every boat');
 ok(P.stageAvailable('millbrook', 0) && !P.stageAvailable('millbrook', 1), 'stage gating');
 let res = P.recordResult({ mapKey: campaignMapKey('millbrook'), stage: 0, difficulty: 'normal', pct: 20, badge: 'gold', lost: false });
 ok(res.improved && res.firstClear && res.newUnlocks.includes('spikes'), 'clearing stage 1 issues spikes');

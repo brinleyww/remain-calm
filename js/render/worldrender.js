@@ -2,6 +2,7 @@
 // zones (hatched), walls, gates, corridors, holds, fire, mosh pits, agents (batched per colour), units, vehicles, rings.
 import { getPalette, rgba, mix, hexToRgb, FONT_MONO } from './palette.js';
 import { drawProjectiles, drawEffects, drawAircraft, stampLabel, tag } from './fx.js';
+import { drawNavalGlyph, drawBoat, BOAT_TYPES } from './navalrender.js';
 import { hash2 } from '../util/rng.js';
 import { pointInPoly, polyBBox } from '../util/geom.js';
 
@@ -262,13 +263,26 @@ function ringPath(path, p, cam) {
   path.closePath();
 }
 
-// Rubble ticks scattered along a broken stretch [a, b] of a wall line.
+// True when arc length s lies in one of the track's gate stretches, widened by pad metres.
+function inGap(tr, s, pad) {
+  const G = tr.gaps;
+  if (!G) return false;
+  const L = tr.L, k0 = tr.closed ? -1 : 0, k1 = tr.closed ? 1 : 0;
+  if (tr.closed) { s %= L; if (s < 0) s += L; }
+  for (const g of G) for (let k = k0; k <= k1; k++) if (s >= g[0] + k * L - pad && s <= g[1] + k * L + pad) return true;
+  return false;
+}
+
+// Rubble ticks scattered along a broken stretch [a, b] of a wall line, none in a gate's opening.
 function rubblePath(path, tr, a, b, cam, lw, seed) {
   const z = cam.zoom, len = b - a;
   const n = Math.max(1, Math.round(len / Math.max(2.2, 7 / z)));
-  const hl = Math.max(1.6, lw * 0.3);
+  const hl = Math.max(1.6, lw * 0.3), pad = hl / z;
+  let drawn = 0;
   for (let j = 0; j < n; j++) {
     const s = a + (j + 0.5) * len / n;
+    if (inGap(tr, s, pad)) continue;
+    drawn++;
     trackAt(tr, s, TQ);
     const h = hash2(seed * 977 + j, Math.floor(s * 4));
     const off = (((h & 255) / 255) - 0.5) * lw * 0.7;
@@ -278,7 +292,7 @@ function rubblePath(path, tr, a, b, cam, lw, seed) {
     const sx = (TQ[0] - cam.x) * z - uy * off, sy = (TQ[1] - cam.y) * z + ux * off;
     path.moveTo(sx - dx * hl, sy - dy * hl); path.lineTo(sx + dx * hl, sy + dy * hl);
   }
-  return n;
+  return drawn;
 }
 
 function hatchPattern(ctx, color, dpr, gap = 7, width = 1) {
@@ -400,6 +414,9 @@ export function drawUnitGlyph(ctx, type, x, y, s, color, paper, o = {}) {
       ctx.beginPath(); ctx.moveTo(-s, s * 0.3); ctx.quadraticCurveTo(0, -s * 0.6, s, s * 0.2); ctx.stroke();
       break;
     }
+    case 'patrolBoat': case 'gunboat': case 'rocketBarge': case 'ferry': case 'waterMine':
+      drawNavalGlyph(ctx, type, s, color, paper, ang);
+      break;
     default: {
       ctx.fillStyle = paper; ctx.beginPath(); ctx.arc(0, 0, s * 0.85, 0, TAU); ctx.fill(); ctx.stroke();
       letter(String(type || '?').charAt(0).toUpperCase());
@@ -933,7 +950,7 @@ export class WorldRenderer {
   drawGate(ctx, cam, geo, color, dead = false, alpha = 1) {
     const z = cam.zoom, ox = cam.x, oy = cam.y;
     const ax = (geo.ax - ox) * z, ay = (geo.ay - oy) * z, bx = (geo.bx - ox) * z, by = (geo.by - oy) * z;
-    const L = Math.max(5, 6 * z), pw = Math.max(1.5, Math.min(3, z * 1.2));
+    const L = Math.max(wallLineWidth(cam) * 0.5 + 1.5, 6 * z), pw = Math.max(1.2, Math.min(3, z * 1.2));
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.lineCap = 'butt';
@@ -1241,6 +1258,7 @@ export class WorldRenderer {
     let nStroke = 0;
     for (const u of list) {
       if (!u || u.alive === false) continue;
+      if (u.veh && u.veh.alive && BOAT_TYPES.has(u.type)) continue;   // drawn with the vehicles
       const col = this.unitColor(world, u);
       const lp = u.p || u.path;
       if (Array.isArray(lp) || ArrayBuffer.isView(lp)) {
@@ -1268,7 +1286,7 @@ export class WorldRenderer {
       }
       if (!(u.x >= bb[0] && u.y >= bb[1] && u.x <= bb[2] && u.y <= bb[3])) continue;
       const sx = (u.x - ox) * z, sy = (u.y - oy) * z;
-      const small = u.type === 'mine' || u.type === 'chemical' || u.type === 'napalm';
+      const small = u.type === 'mine' || u.type === 'chemical' || u.type === 'napalm' || u.type === 'waterMine';
       const ss = small ? Math.max(3, s * 0.6) : s;
       const angle = Number.isFinite(u.ax) && Number.isFinite(u.ay) && (u.ax !== u.x || u.ay !== u.y) ? Math.atan2(u.ay - u.y, u.ax - u.x)
         : Number.isFinite(u.angle) ? u.angle : -Math.PI / 4;
@@ -1302,7 +1320,7 @@ export class WorldRenderer {
       const sx = (v.x - cam.x) * z, sy = (v.y - cam.y) * z;
       if (sx < -60 || sy < -60 || sx > cam.w + 60 || sy > cam.h + 60) continue;
       const col = world.owners > 1 && v.owner > 0 ? pal.carbon : pal.ink;
-      const r = drawVehicleGlyph(ctx, v, sx, sy, z, pal, st.rt, col);
+      const r = v.boat ? drawBoat(ctx, v, sx, sy, z, pal, col, world) : drawVehicleGlyph(ctx, v, sx, sy, z, pal, st.rt, col);
       if (v.hpMax > 0 && v.hp < v.hpMax) {
         const f = Math.max(0, v.hp / v.hpMax), w = Math.max(14, r * 2);
         ctx.fillStyle = pal.ink3; ctx.fillRect(sx - w / 2, sy + r + 4, w, 2);

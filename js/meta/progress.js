@@ -1,7 +1,7 @@
 // Local progress (localStorage): per map / stage / difficulty records, campaign unlocks, Flawless marks,
 // the saved loadout, lifetime totals and awarded achievements.
 import { DEFAULTS } from '../data/config.js';
-import { CAMPAIGN, campaignMapKey, unlockedItems, getCampaignCity, ALL_ITEMS } from '../map/campaign.js';
+import { CAMPAIGN, campaignMapKey, unlockedItems, getCampaignCity, ALL_ITEMS, FREE_PLAY_ITEMS } from '../map/campaign.js';
 
 const KEY = 'remain-calm.progress.v1';
 export const DIFFICULTIES = ['normal', 'hardcore', 'ultra'];
@@ -197,6 +197,7 @@ export function unlockedSet() {
   return unlockCache;
 }
 export function isUnlocked(id) { return unlockedSet().has(id); }
+export function freePlaySet() { return new Set([...unlockedSet(), ...FREE_PLAY_ITEMS]); }
 export function unlockAll(flag = true) { state.unlockAll = !!flag; changed('unlockAll'); }
 
 // Highest unit upgrade level allowed: 2 base, 3-5 by campaign unlocks.

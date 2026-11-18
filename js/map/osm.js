@@ -222,8 +222,9 @@ export function fileSquare(bounds) {
   return { lat, lon, maxKm: clamp(Math.floor(side * 2 + 0.05) / 2, IMPORT_RANGE.min, IMPORT_RANGE.max), sideKm: side };
 }
 
+// refresh = true skips the cached copy (it is replaced by the new download).
 // -> { map, huge, warnings, stats, source: 'network'|'cache'|'file', info, lat, lon, sizeKm }
-export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onProgress, signal, fetchImpl, file, text, cache = true } = {}) {
+export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onProgress, signal, fetchImpl, file, text, cache = true, refresh = false } = {}) {
   const t0 = now();
   const emit = p => { if (onProgress) onProgress(p); };
   let raw = null, source = 'network', info = {};
@@ -244,7 +245,7 @@ export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onPr
     if (!Number.isFinite(+lat) || !Number.isFinite(+lon)) throw new Error('No location chosen');
     lat = roundCoord(lat); lon = roundCoord(lon); sizeKm = snapSize(sizeKm);
     const key = cacheKey(lat, lon, sizeKm);
-    if (cache) {
+    if (cache && !refresh) {
       try { raw = await cacheGet(key); } catch (e) { raw = null; }
       if (raw) { source = 'cache'; emit({ phase: 'cache' }); info = { elements: raw.elements.length }; }
     }
@@ -262,6 +263,8 @@ export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onPr
   const t1 = now();
   const map = osmToMap(raw, { lat, lon, sizeKm, name, stages });
   info.convertMs = Math.round(now() - t1);
+  await new Promise(r => setTimeout(r, 0));
+  if (signal && signal.aborted) throw cancelled();
   const stats = mapStats(map);
   const huge = isHugeMap(map);
   if (huge) warnings.push('Large map: expect slower simulation on modest computers.');
@@ -306,7 +309,15 @@ function isWaterArea(t) {
   return t.natural === 'water' || t.waterway === 'riverbank' || t.waterway === 'dock' || t.landuse === 'reservoir' || t.landuse === 'basin'
     || (t.water && t.water !== 'no' && t.natural !== 'wetland' && !t.building);
 }
+// Back gardens and other private yards are mapped as leisure=garden; they stay open ground, not parks.
+const YARD_TYPES = new Set(['residential', 'private', 'backyard', 'back_yard', 'front_yard', 'yard', 'domestic']);
+const NO_ACCESS = new Set(['private', 'no', 'residents', 'customers']);
+export function isPrivateGarden(t) {
+  if (t.leisure !== 'garden') return false;
+  return YARD_TYPES.has(t['garden:type']) || NO_ACCESS.has(t.access) || t.garden === 'residential' || t.residential === 'garden';
+}
 function isPark(t) {
+  if (isPrivateGarden(t)) return false;
   return (t.leisure && PARK_TAGS.leisure.has(t.leisure)) || (t.landuse && PARK_TAGS.landuse.has(t.landuse)) || (t.natural && PARK_TAGS.natural.has(t.natural));
 }
 

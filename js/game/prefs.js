@@ -9,6 +9,7 @@ export const DEFAULT_KEYS = {
   unit1: ['Digit1'], unit2: ['Digit2'], unit3: ['Digit3'], unit4: ['Digit4'], unit5: ['Digit5'], unit6: ['Digit6'], unit7: ['Digit7'],
   ability1: ['F1', 'Shift+Digit1'], ability2: ['F2', 'Shift+Digit2'], ability3: ['F3', 'Shift+Digit3'], ability4: ['F4', 'Shift+Digit4'],
   ability5: ['F5', 'Shift+Digit5'], ability6: ['F6', 'Shift+Digit6'], ability7: ['F7', 'Shift+Digit7'], ability8: ['F8', 'Shift+Digit8'],
+  orderMove: ['KeyM'], orderHunt: ['KeyH'], orderHold: ['KeyK'], orderReturn: ['KeyZ'],
   viewHeights: ['KeyV'], viewSpecials: ['KeyC'], viewRanges: ['KeyR'], fitStage: ['Home'],
   panUp: ['KeyW', 'ArrowUp'], panDown: ['KeyS', 'ArrowDown'], panLeft: ['KeyA', 'ArrowLeft'], panRight: ['KeyD', 'ArrowRight'],
 };

@@ -20,6 +20,11 @@ export const UNIT_TEXT = {
   c4: ['Demolition Charge', 'Fix to a building or bridge and detonate by hand.'],
   spikes: ['Spike Strip', 'A drawn line that slows the infected. Priced per metre.'],
   oil: ['Oil Slick', 'A drawn line that ignites when crossed. Priced per metre.'],
+  patrolBoat: ['Patrol Boat', 'Fast launch with a machine gun that patrols its water.'],
+  gunboat: ['Gunboat', 'Slow, tough boat with a deck cannon and a machine gun.'],
+  rocketBarge: ['Rocket Barge', 'Rocket salvoes at crowds from the water, then a long reload.'],
+  ferry: ['Evac Ferry', 'Carries residents from the shore to a zone on the water or out by river.'],
+  waterMine: ['Water Mine', 'Painted on water. Explodes under the infected that swim.'],
 };
 
 export const ABILITY_TEXT = {
@@ -125,6 +130,11 @@ const SYM = {
   c4: '<rect x="4" y="8" width="11" height="8"/><path d="M15 12 C18 12 17 6 21 6" fill="none" stroke-width="1.5"/>',
   spikes: '<path d="M2 15 L5 8 L8 15 L11 8 L14 15 L17 8 L20 15" fill="none" stroke-width="1.7"/>',
   oil: '<path d="M2 13c3-4 5 4 8 0s5 4 8 0 3 2 4 1" fill="none" stroke-width="2"/>',
+  patrolBoat: '<path d="M21 12 C16 8.5 9 9 3 10 V14 C9 15 16 15.5 21 12 Z" fill="none" stroke-width="1.6"/><circle cx="15.5" cy="12" r="1.6"/>',
+  gunboat: '<path d="M22 12 C16 7.5 8 8 2.5 9.5 V14.5 C8 16 16 16.5 22 12 Z" fill="none" stroke-width="1.6"/><circle cx="15" cy="12" r="2.2"/><path d="M15 12 H20.5" stroke-width="1.6"/>',
+  rocketBarge: '<path d="M22 10 L19.5 7.5 H2.5 V16.5 H19.5 L22 14 Z" fill="none" stroke-width="1.6"/><path d="M8 10.5h1.5M11 10.5h1.5M14 10.5h1.5M8 13.5h1.5M11 13.5h1.5M14 13.5h1.5" stroke-width="1.6"/>',
+  ferry: '<path d="M22 12 C19 7.5 14 7.5 3.5 7.5 Q2.5 7.5 2.5 9 V15 Q2.5 16.5 3.5 16.5 C14 16.5 19 16.5 22 12 Z" fill="none" stroke-width="1.6"/><rect x="6" y="9.6" width="9" height="4.8"/>',
+  waterMine: '<circle cx="12" cy="10" r="3.6"/><path d="M12 4.2V6M12 14V15.8M6.2 10H8M16 10H17.8" stroke-width="1.6"/><path d="M3 19c3-2 6 2 9 0s6 2 9 0" fill="none" stroke-width="1.4"/>',
 };
 
 export function unitSymbol(id, size = 24) {

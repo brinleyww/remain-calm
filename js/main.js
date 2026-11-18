@@ -1,7 +1,7 @@
 // Boot + screen manager: hash-routed menu screens, session launch and return, results -> progress.
 import { applyDisplaySettings, onSettingsChange, popScaleMutator, gamePalette } from './meta/settings.js';
 import {
-  recordResult, unlockedSet, maxUpgradeLevel, setLoadout, getLoadout, setLastPlayed, markFlawless, getProgress,
+  recordResult, unlockedSet, freePlaySet, maxUpgradeLevel, setLoadout, getLoadout, setLastPlayed, markFlawless, getProgress,
 } from './meta/progress.js';
 import { evaluateResult } from './meta/achievements.js';
 import { ALL_ITEMS, campaignMapKey, getCampaignCity } from './map/campaign.js';
@@ -160,7 +160,7 @@ async function launchNow(opts) {
     return false;
   }
   const sandbox = mode === 'sandbox';
-  const unlocked = sandbox || mode === 'test' ? new Set(ALL_ITEMS) : unlockedSet();
+  const unlocked = sandbox || mode === 'test' ? new Set(ALL_ITEMS) : mode === 'free' ? freePlaySet() : unlockedSet();
   const difficulty = opts.difficulty || 'normal';
   const startStage = Math.max(0, opts.startStage | 0);
   const userLines = (opts.mutators || []).filter(Boolean);
@@ -306,9 +306,9 @@ async function openGameSettings(done) {
 }
 
 // Menu-side loadout editor: resolves with the new loadout or null.
-function editLoadout({ map = null, stage = 0, cfg = DEFAULTS, difficulty = 'normal', sandbox = false } = {}) {
+function editLoadout({ map = null, stage = 0, cfg = DEFAULTS, difficulty = 'normal', sandbox = false, free = false } = {}) {
   return import('./ui/loadout.js').then(mod => new Promise(res => {
-    const unlocked = sandbox ? new Set(ALL_ITEMS) : unlockedSet();
+    const unlocked = sandbox ? new Set(ALL_ITEMS) : free ? freePlaySet() : unlockedSet();
     const spCap = sandbox ? Infinity : map ? stageCaps(map, stage, cfg, difficulty).sp : null;
     mod.openLoadout(document.body, {
       unlocked, current: getLoadout(), spCap, cfg, note: map ? `Stage ${stage + 1} of ${map.name}` : '',
