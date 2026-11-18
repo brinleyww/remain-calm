@@ -4,6 +4,7 @@ import { campaignSummary, getLastPlayed, getProgress, stageAvailable } from '../
 import { achievementCount } from '../meta/achievements.js';
 import { getCampaignCity } from '../map/campaign.js';
 import { DIFF_LABEL } from './screen.js';
+import { VERSION } from '../version.js';
 
 let introPlayed = false;
 
@@ -23,6 +24,7 @@ export function mount(root, app) {
   const entries = [
     { id: 'campaign', name: 'Campaign', note: `${sum.cleared} / ${sum.stages} stages`, go: () => app.go('campaign') },
     { id: 'freeplay', name: 'Free Play', note: 'Any city, your rules', go: () => app.go('freeplay') },
+    { id: 'realplace', name: 'Real Place', note: 'Your own town, from the map', go: () => app.go('freeplay', { tab: 'osm' }) },
     { id: 'daily', name: 'Daily Challenge', note: fmtDate(today.getTime()), go: () => app.go('daily') },
     { id: 'sandbox', name: 'Sandbox', note: 'Unlimited funds', go: () => app.go('freeplay', { sandbox: 1 }) },
     { id: 'coop', name: 'Co-operative', note: 'Two offices, one city', go: () => app.go('coop') },
@@ -34,10 +36,10 @@ export function mount(root, app) {
   ];
 
   const items = entries.map((e, i) => {
-    const key = String((i + 1) % 10);
+    const key = i < 10 ? String((i + 1) % 10) : '';
     const name = h('span.dir-name', e.name);
     const btn = h('button.dir-item', { type: 'button', dataset: { id: e.id } },
-      h('span.dir-box'), keycap(key, 'dir-key'), name, h('span.dir-leader'), h('span.dir-note', e.note));
+      h('span.dir-box'), key ? keycap(key, 'dir-key') : h('span.dir-key'), name, h('span.dir-leader'), h('span.dir-note', e.note));
     btn.addEventListener('click', () => { sfx.thump(); e.go(); });
     btn.addEventListener('mouseenter', () => btn.focus({ preventScroll: true }));
     btn.addEventListener('focus', () => sfx.key());
@@ -82,7 +84,8 @@ export function mount(root, app) {
           h('div.dir-head', h('span.h3', 'Directory of services'), h('span.form-no', 'Form OCP-1')),
           resume,
           h('ol.dir-list', items.map(it => h('li', it.btn))),
-          h('p.dir-hint.tiny.faint', 'Number keys or arrows and Enter. Esc returns here from any screen.'))),
+          h('p.dir-hint.tiny.faint', 'Number keys or arrows and Enter. Esc returns here from any screen.'),
+          h('p.dir-hint.title-ver.tiny.faint.mono', 'Version ' + VERSION))),
       h('div.bull-foot',
         h('span', `Stages cleared ${sum.cleared}/${sum.stages}`),
         h('span', `Cities secured ${sum.cities}/${sum.total}`),

@@ -1,7 +1,7 @@
 // Safe zones (union-of-polygons components), gates, standalone walls, corridors and holds.
 import { T } from '../map/format.js';
-import { rasterPoly, rasterPolyline, polyArea, polyPerimeter, pointInPoly, clamp } from '../util/geom.js';
-import { updatePassCells, touchNav, buildCorridorField, corridorContains, corridorBBox } from './nav.js';
+import { rasterPoly, rasterSegCover, unionBoundary, polyArea, polyPerimeter, pointInPoly, clamp } from '../util/geom.js';
+import { updatePassCells, touchNav, buildCorridorField, corridorContains, corridorBBox, isWalkTerrain } from './nav.js';
 import { canAfford, spend, refundPlacement } from './economy.js';
 import { refreshFunctions } from './structures.js';
 
@@ -18,6 +18,9 @@ export function initZones(world) {
   world.corrGrid = new Int16Array(N);
   world.holdGrid = new Int16Array(N);
   world.gateIdx = new Int16Array(N);
+  // wall geometry: each wall/gate cell points at the true segment through it (-1 none, -2 several: solid cell)
+  world.wallSeg = new Int32Array(N).fill(-1);
+  world.wallSegs = new Float64Array(0);      // per segment: ax, ay, ux, uy, length
   world.zoneLand = 0;
   world._blockCells = new Int32Array(0);
   world._unionCells = new Int32Array(0);
@@ -30,8 +33,10 @@ const levelMul = (world, lvl) => { const m = world.cfg.wall.levelHpMul; return m
 const own = (world, item, owner) => world.owners < 2 || item.owner === owner;
 
 // ---------------------------------------------------------------- rebuild
+// A component is the union of touching polygons. Its wall is the supercover of the union's boundary segments
+// (a 4-connected band that every point of the drawn line falls in); interior = cells with their centre inside, minus the band.
 export function rebuildZones(world) {
-  const g = world.grid, gw = g.gw, gh = g.gh, mask = world.region.mask;
+  const g = world.grid, gw = g.gw, gh = g.gh, mask = world.region.mask, cs = g.cell;
   const zc = world.zoneComp, zi = world.zoneId;
   for (const c of world._unionCells) { zc[c] = 0; zi[c] = 0; }
   const union = world._tmpKind;
@@ -39,11 +44,16 @@ export function rebuildZones(world) {
   const first = new Int32Array(polys.length).fill(-1);
   const all = [];
   for (let k = 0; k < polys.length; k++) {
-    rasterPoly(polys[k].p, g.cell, gw, gh, (c) => {
+    rasterPoly(polys[k].p, cs, gw, gh, (c) => {
       if (!mask[c]) return;
       if (first[k] < 0) first[k] = c;
-      if (!union[c]) { union[c] = 1; all.push(c); }
+      if (!union[c]) all.push(c);
+      union[c] |= 1;
     });
+  }
+  const segs = unionBoundary(polys.map((pl) => pl.p));
+  for (let s = 0; s < segs.length; s += 4) {
+    rasterSegCover(segs[s], segs[s + 1], segs[s + 2], segs[s + 3], cs, gw, gh, (c) => { if (!union[c]) all.push(c); union[c] |= 2; });
   }
   all.sort((a, b) => a - b);
   const comps = [];
@@ -66,28 +76,31 @@ export function rebuildZones(world) {
     }
     cells.sort((a, b) => a - b);
     const wallCells = [], interiorCells = [];
-    let sx = 0, sy = 0;
+    let sx = 0, sy = 0, nu = 0;
     for (const c of cells) {
-      const X = c % gw, Y = (c / gw) | 0;
-      sx += X; sy += Y;
-      if (g.terrain[c] !== T.WATER) land++;
-      let edge = X === 0 || Y === 0 || X === gw - 1 || Y === gh - 1;
-      if (!edge) {
-        for (let dy = -1; dy <= 1 && !edge; dy++) for (let dx = -1; dx <= 1; dx++) {
-          if (!union[(Y + dy) * gw + X + dx]) { edge = true; break; }
-        }
-      }
-      if (edge) wallCells.push(c); else { interiorCells.push(c); zi[c] = id; }
+      const u = union[c];
+      if (u === 1) { interiorCells.push(c); zi[c] = id; } else wallCells.push(c);
+      if (u & 1) { nu++; sx += c % gw; sy += (c / gw) | 0; if (g.terrain[c] !== T.WATER) land++; }
     }
+    if (!nu) { for (const c of cells) { sx += c % gw; sy += (c / gw) | 0; } nu = cells.length; }
     comps.push({
       id: id - 1, cells: Int32Array.from(cells), wallCells: Int32Array.from(wallCells), interiorCells: Int32Array.from(interiorCells),
-      breached: false, wallLevel: 1, owner: 0, bldgs: [], polys: [],
-      cx: (sx / cells.length + 0.5) * g.cell, cy: (sy / cells.length + 0.5) * g.cell,
+      breached: false, wallLevel: 1, owner: 0, bldgs: [], polys: [], segs: null,
+      cx: (sx / nu + 0.5) * cs, cy: (sy / nu + 0.5) * cs,
     });
   }
   for (const c of all) union[c] = 0;
   world._unionCells = Int32Array.from(all);
   world.zoneLand = land;
+
+  // true boundary segments [ax,ay,bx,by,...] per component
+  const per = comps.map(() => []);
+  for (let s = 0; s < segs.length; s += 4) {
+    const c = world.cellAt((segs[s] + segs[s + 2]) * 0.5, (segs[s + 1] + segs[s + 3]) * 0.5);
+    const k = c >= 0 ? zc[c] - 1 : -1;
+    if (k >= 0) per[k].push(segs[s], segs[s + 1], segs[s + 2], segs[s + 3]);
+  }
+  comps.forEach((comp, k) => { comp.segs = Float64Array.from(per[k]); });
 
   for (let k = 0; k < polys.length; k++) {
     const pl = polys[k];
@@ -126,45 +139,139 @@ export function rebuildZones(world) {
   touchNav(world);
 }
 
-function nearestZoneWallCell(world, x, y, maxCells) {
-  const g = world.grid, cx0 = Math.floor(x / g.cell), cy0 = Math.floor(y / g.cell);
-  let best = -1, bd = Infinity;
-  for (let dy = -maxCells; dy <= maxCells; dy++) for (let dx = -maxCells; dx <= maxCells; dx++) {
-    const cx = cx0 + dx, cy = cy0 + dy;
-    if (cx < 0 || cy < 0 || cx >= g.gw || cy >= g.gh) continue;
-    const c = cy * g.gw + cx;
-    if (!world.zoneComp[c] || world.zoneId[c]) continue;
-    const ex = (cx + 0.5) * g.cell - x, ey = (cy + 0.5) * g.cell - y, d = ex * ex + ey * ey;
-    if (d < bd) { bd = d; best = c; }
+// Closest point on any zone's true boundary within maxD of (x,y).
+function nearestEdge(world, x, y, maxD) {
+  let best = null, bd = maxD * maxD;
+  for (const comp of world.zones.comps) {
+    const S = comp.segs;
+    for (let s = 0; s < S.length; s += 4) {
+      const ax = S[s], ay = S[s + 1], dx = S[s + 2] - ax, dy = S[s + 3] - ay, l2 = dx * dx + dy * dy;
+      if (l2 < 1e-9) continue;
+      const t = clamp(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1), px = ax + dx * t, py = ay + dy * t;
+      const d = (px - x) * (px - x) + (py - y) * (py - y);
+      if (d < bd) { bd = d; best = { comp: comp.id, s, t, L: Math.sqrt(l2) }; }
+    }
   }
   return best;
 }
 
-function gateCellsAt(world, c0) {
-  const g = world.grid, comp = world.zoneComp[c0];
-  const cx0 = c0 % g.gw, cy0 = (c0 / g.gw) | 0;
-  const r = world.cfg.gate.width * 0.5, rc = Math.ceil(r / g.cell);
-  const out = [];
-  for (let dy = -rc; dy <= rc; dy++) for (let dx = -rc; dx <= rc; dx++) {
-    const cx = cx0 + dx, cy = cy0 + dy;
-    if (cx < 0 || cy < 0 || cx >= g.gw || cy >= g.gh) continue;
-    if ((dx * dx + dy * dy) * g.cell * g.cell > r * r + 1e-6) continue;
+// A gate centred on the true edge: kept on one straight segment when it fits; its cells are the comp's band cells within half a gate width.
+function gateGeom(world, e) {
+  const comp = world.zones.comps[e.comp], S = comp.segs, s = e.s, g = world.grid, cs = g.cell;
+  const ax = S[s], ay = S[s + 1], ux = (S[s + 2] - ax) / e.L, uy = (S[s + 3] - ay) / e.L;
+  const hw = world.cfg.gate.width * 0.5;
+  let t = e.t * e.L;
+  if (e.L >= 2 * hw) t = clamp(t, hw, e.L - hw);
+  const x = ax + ux * t, y = ay + uy * t;
+  const t0 = Math.max(0, t - hw), t1 = Math.min(e.L, t + hw);
+  const id1 = comp.id + 1, out = [];
+  const rc = Math.ceil(hw / cs) + 1, cx0 = Math.floor(x / cs), cy0 = Math.floor(y / cs);
+  for (let cy = Math.max(0, cy0 - rc); cy <= Math.min(g.gh - 1, cy0 + rc); cy++) for (let cx = Math.max(0, cx0 - rc); cx <= Math.min(g.gw - 1, cx0 + rc); cx++) {
     const c = cy * g.gw + cx;
-    if (world.zoneComp[c] === comp && !world.zoneId[c]) out.push(c);
+    if (world.zoneComp[c] !== id1 || world.zoneId[c]) continue;
+    const qx = clamp(x, cx * cs, (cx + 1) * cs) - x, qy = clamp(y, cy * cs, (cy + 1) * cs) - y;
+    if (qx * qx + qy * qy <= hw * hw) out.push(c);
   }
-  return out.sort((a, b) => a - b);
+  out.sort((a, b) => a - b);
+  return { comp: comp.id, x, y, x0: ax + ux * t0, y0: ay + uy * t0, x1: ax + ux * t1, y1: ay + uy * t1, cells: out };
+}
+
+// Does a gate with these cells join walkable ground inside the zone to open ground outside? A BFS of about 150 cells.
+const OPEN_MIN = 150;
+export function gateOpening(world, comp, cells) {
+  const g = world.grid, gw = g.gw, terr = g.terrain, mask = world.region.mask, id1 = comp + 1;
+  const walk = (c) => mask[c] === 1 && isWalkTerrain(terr[c]);
+  const free = (c) => walk(c) && !world.zoneComp[c] && !(world.block[c] && world.wallHp[c] > 0);
+  const N = gw * g.gh;
+  if (!world._gateMark || world._gateMark.length !== N) { world._gateMark = new Uint32Array(N); world._gateGen = 0; }
+  const mark = world._gateMark, gen = ++world._gateGen;
+  const gate = new Set();
+  for (const c of cells) if (walk(c)) gate.add(c);
+  if (!gate.size) return { ok: false, inside: false, outside: false, reason: 'The gate opens into a building' };
+  const q = [];
+  for (const c of gate) {
+    for (const n of [c - 1, c + 1, c - gw, c + gw]) if (world.zoneId[n] === id1 && walk(n)) { mark[c] = gen; q.push(c); break; }
+  }
+  if (!q.length) return { ok: false, inside: false, outside: false, reason: 'Buildings block the gate on the inside' };
+  const seeds = [];
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h];
+    for (const n of [c - 1, c + 1, c - gw, c + gw]) {
+      if (mark[n] === gen) continue;
+      if (gate.has(n)) { mark[n] = gen; q.push(n); } else if (free(n)) { mark[n] = gen; seeds.push(n); }
+    }
+  }
+  if (!seeds.length) return { ok: false, inside: true, outside: false, reason: 'The gate opens onto a building' };
+  // open ground touching the gate on the outside, in cells: one cell of a 12 m gate lets people through only in single file
+  const approach = seeds.length, narrow = approach * g.cell < world.cfg.gate.width * 0.5;
+  let h = 0;
+  for (; h < seeds.length && h < OPEN_MIN; h++) {
+    const c = seeds[h];
+    for (const m of [c - 1, c + 1, c - gw, c + gw]) if (mark[m] !== gen && free(m)) { mark[m] = gen; seeds.push(m); }
+  }
+  const outside = h >= OPEN_MIN;
+  return { ok: outside, inside: true, outside, width: gate.size, approach, narrow: outside && narrow,
+    reason: !outside ? 'The gate opens onto a closed yard' : narrow ? 'Most of the gate faces a building' : '' };
+}
+
+// Where a gate clicked at (x,y) goes: the nearest spot on the true wall within 12 m; when that spot opens onto
+// nothing walkable, the spot within 12 m of the click with the widest real opening. `opens`/`warn` say how it ended up.
+export function gateSpot(world, x, y, owner = 0) {
+  const maxD = world.grid.cell * 3;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, reason: 'Place gates on a safe-zone wall' };
+  const e = nearestEdge(world, x, y, maxD);
+  if (!e) return { ok: false, reason: 'Place gates on a safe-zone wall' };
+  if (!own(world, world.zones.comps[e.comp], owner)) return { ok: false, reason: 'Gates go on your own walls' };
+  let best = gateGeom(world, e), open = gateOpening(world, best.comp, best.cells);
+  if (!open.ok || open.narrow) {
+    const cand = [];
+    for (const comp of world.zones.comps) {
+      if (!own(world, comp, owner)) continue;
+      const S = comp.segs;
+      for (let s = 0; s < S.length; s += 4) {
+        const ax = S[s], ay = S[s + 1], dx = S[s + 2] - ax, dy = S[s + 3] - ay, L = Math.sqrt(dx * dx + dy * dy);
+        if (L < 1e-6) continue;
+        for (let d = 0; d <= L; d += 2) {
+          const px = ax + dx * d / L, py = ay + dy * d / L, dd = (px - x) * (px - x) + (py - y) * (py - y);
+          if (dd <= maxD * maxD) cand.push([dd, comp.id, s, d / L, L]);
+        }
+      }
+    }
+    cand.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]);
+    const score = (o) => (o.ok ? 1 + (o.narrow ? 0 : 1e6) + o.approach * 1000 + o.width : 0);
+    let bw = score(open);
+    for (const [, comp, s, t, L] of cand) {
+      const gg = gateGeom(world, { comp, s, t, L });
+      const o = gateOpening(world, comp, gg.cells), sc = score(o);
+      if (sc > bw) { best = gg; open = o; bw = sc; }
+    }
+  }
+  return { ok: true, ...best, opens: open.ok, warn: open.reason };
+}
+
+// Checks an existing gate (by id) or a prospective one (by point): { opens, warn, x, y } — cheap enough for a cursor preview.
+export function gateCheck(world, idOrX, y, owner = 0) {
+  if (y === undefined) {
+    const gt = world.zones.gates.find((q) => q.id === idOrX);
+    if (!gt) return { ok: false, opens: false, warn: 'No such gate' };
+    const o = gateOpening(world, gt.comp, gt.cells);
+    return { ok: true, opens: o.ok, warn: o.reason, x: gt.x, y: gt.y };
+  }
+  return gateSpot(world, +idOrX, +y, owner);
 }
 
 function resnapGates(world) {
   const keep = [];
   const gcfg = world.cfg.gate;
   for (const gt of world.zones.gates) {
-    const c0 = nearestZoneWallCell(world, gt.x, gt.y, 2);
-    if (c0 < 0) { refundPlacement(world, gt, 'gate'); continue; }
-    const comp = world.zones.comps[world.zoneComp[c0] - 1];
+    const e = nearestEdge(world, gt.x, gt.y, world.grid.cell * 2);
+    if (!e) { refundPlacement(world, gt, 'gate'); continue; }
+    const comp = world.zones.comps[e.comp];
     if (!own(world, comp, gt.owner)) { refundPlacement(world, gt, 'gate'); continue; }
+    const gg = gateGeom(world, e);
     gt.comp = comp.id;
-    gt.cells = Int32Array.from(gateCellsAt(world, c0));
+    gt.cells = Int32Array.from(gg.cells);
+    gt.x0 = gg.x0; gt.y0 = gg.y0; gt.x1 = gg.x1; gt.y1 = gg.y1;
     const hpMax = gcfg.hp * levelMul(world, comp.wallLevel);
     gt.hp = world.phase === 'battle' && gt.hpMax ? Math.min(gt.hp, hpMax) : hpMax;
     gt.hpMax = hpMax;
@@ -200,8 +307,44 @@ export function rebuildBlocks(world) {
   });
   for (let k = 0; k < old.length; k++) { tk[old[k]] = 0; th[old[k]] = 0; }
   world._blockCells = Int32Array.from(out);
+  rebuildWallSegs(world, old);
   updatePassCells(world, old);
   updatePassCells(world, world._blockCells);
+  if (world._onBlocks) world._onBlocks();
+}
+
+// Per-cell references to the true wall segments (standalone polylines and zone boundaries).
+function rebuildWallSegs(world, old) {
+  const ws = world.wallSeg, g = world.grid, cs = g.cell, mask = world.region.mask;
+  for (let k = 0; k < old.length; k++) ws[old[k]] = -1;
+  const S = [];
+  const add = (ax, ay, bx, by) => {
+    const dx = bx - ax, dy = by - ay, L = Math.sqrt(dx * dx + dy * dy);
+    if (L < 1e-6) return -1;
+    S.push(ax, ay, dx / L, dy / L, L);
+    return S.length / 5 - 1;
+  };
+  const same = (a, b) => {
+    const ka = a * 5, kb = b * 5;
+    if (Math.abs(S[ka + 2] * S[kb + 3] - S[ka + 3] * S[kb + 2]) > 1e-6) return false;
+    return Math.abs((S[kb] - S[ka]) * S[ka + 3] - (S[kb + 1] - S[ka + 1]) * S[ka + 2]) < 1e-3;
+  };
+  const ref = (c, id) => { const r = ws[c]; if (r === -1) ws[c] = id; else if (r >= 0 && r !== id && !same(r, id)) ws[c] = -2; };
+  for (const w of world.walls) {
+    const p = w.p;
+    for (let i = 0; i + 3 < p.length; i += 2) {
+      const id = add(p[i], p[i + 1], p[i + 2], p[i + 3]);
+      if (id >= 0) rasterSegCover(p[i], p[i + 1], p[i + 2], p[i + 3], cs, g.gw, g.gh, (c) => { if (mask[c]) ref(c, id); });
+    }
+  }
+  for (const comp of world.zones.comps) {
+    const P = comp.segs, id1 = comp.id + 1;
+    for (let s = 0; s < P.length; s += 4) {
+      const id = add(P[s], P[s + 1], P[s + 2], P[s + 3]);
+      if (id >= 0) rasterSegCover(P[s], P[s + 1], P[s + 2], P[s + 3], cs, g.gw, g.gh, (c) => { if (world.zoneComp[c] === id1) ref(c, id); });
+    }
+  }
+  world.wallSegs = Float64Array.from(S);
 }
 
 export function rebuildFeatureGrids(world) {
@@ -284,11 +427,7 @@ function zoneAddQuote(world, cmd) {
   const g = world.grid, gw = g.gw, mask = world.region.mask;
   const touched = new Set();
   let cells = 0, newLand = 0;
-  rasterPoly(p, g.cell, gw, g.gh, (c) => {
-    if (!mask[c]) return;
-    cells++;
-    if (world.zoneComp[c]) { touched.add(world.zoneComp[c] - 1); return; }
-    if (g.terrain[c] !== T.WATER) newLand++;
+  const touch = (c) => {
     const X = c % gw, Y = (c / gw) | 0;
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       const nx = X + dx, ny = Y + dy;
@@ -296,7 +435,16 @@ function zoneAddQuote(world, cmd) {
       const z = world.zoneComp[ny * gw + nx];
       if (z) touched.add(z - 1);
     }
+  };
+  rasterPoly(p, g.cell, gw, g.gh, (c) => {
+    if (!mask[c]) return;
+    cells++;
+    if (world.zoneComp[c]) { touched.add(world.zoneComp[c] - 1); return; }
+    if (g.terrain[c] !== T.WATER) newLand++;
+    touch(c);
   });
+  // rebuildZones also floods the wall band along the edges, so zones a few metres apart still merge
+  for (let i = 0, n = p.length; i < n; i += 2) rasterSegCover(p[i], p[i + 1], p[(i + 2) % n], p[(i + 3) % n], g.cell, gw, g.gh, touch);
   if (cells < 9) return fail('Too small');
   for (const k of touched) if (!own(world, world.zones.comps[k], owner)) return fail("Touches your partner's zone");
   const comps = world.zones.comps.length;
@@ -413,27 +561,25 @@ function zoneUpgrade(world, cmd, q) {
 
 function gateAddQuote(world, cmd) {
   if (!phaseOk(world)) return fail('Stage is over');
-  const c0 = nearestZoneWallCell(world, +cmd.x, +cmd.y, 3);
-  if (c0 < 0) return fail('Place gates on a safe-zone wall');
-  const comp = world.zones.comps[world.zoneComp[c0] - 1];
-  if (!own(world, comp, cmd.owner | 0)) return fail('Gates go on your own walls');
-  const cells = gateCellsAt(world, c0);
-  for (const c of cells) if (world.block[c] === 3) return fail('There is already a gate here');
+  const sp = gateSpot(world, +cmd.x, +cmd.y, cmd.owner | 0);
+  if (!sp.ok) return fail(sp.reason);
+  if (!sp.cells.length) return fail('Place gates on a safe-zone wall');
+  for (const c of sp.cells) if (world.block[c] === 3) return fail('There is already a gate here');
   const cost = world.cfg.gate.cost;
-  if (!canAfford(world, cost, cmd.owner | 0)) return { ok: false, reason: 'Not enough money', cost };
-  return { ok: true, cost, c0, cells, comp: comp.id };
+  if (!canAfford(world, cost, cmd.owner | 0)) return { ok: false, reason: 'Not enough money', cost, x: sp.x, y: sp.y, opens: sp.opens, warn: sp.warn };
+  return { ...sp, ok: true, cost };
 }
 
 function gateAdd(world, cmd, q) {
-  const g = world.grid, comp = world.zones.comps[q.comp];
+  const comp = world.zones.comps[q.comp];
   const hpMax = world.cfg.gate.hp * levelMul(world, comp.wallLevel);
   const id = world.nextId();
-  const gt = { id, x: (q.c0 % g.gw + 0.5) * g.cell, y: (((q.c0 / g.gw) | 0) + 0.5) * g.cell, comp: q.comp, cells: Int32Array.from(q.cells), hp: hpMax, hpMax, owner: cmd.owner | 0, paid: q.cost };
+  const gt = { id, x: q.x, y: q.y, x0: q.x0, y0: q.y0, x1: q.x1, y1: q.y1, comp: q.comp, cells: Int32Array.from(q.cells), hp: hpMax, hpMax, owner: cmd.owner | 0, paid: q.cost };
   world.zones.gates.push(gt);
   rebuildBlocks(world);
   touchNav(world);
   spend(world, q.cost, gt.owner, 'gate');
-  return { ok: true, id, cost: q.cost };
+  return { ok: true, id, cost: q.cost, opens: q.opens, warn: q.warn };
 }
 
 function simpleRemoveQuote(list, label) {
@@ -457,7 +603,7 @@ function gateRemove(world, cmd) {
 
 function wallCells(world, p) {
   const g = world.grid, mask = world.region.mask, set = new Set();
-  rasterPolyline(p, g.cell * 1.5, g.cell, g.gw, g.gh, (c) => { if (mask[c]) set.add(c); });
+  for (let i = 0; i + 3 < p.length; i += 2) rasterSegCover(p[i], p[i + 1], p[i + 2], p[i + 3], g.cell, g.gw, g.gh, (c) => { if (mask[c]) set.add(c); });
   return Int32Array.from([...set].sort((a, b) => a - b));
 }
 

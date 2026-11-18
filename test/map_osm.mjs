@@ -1,4 +1,4 @@
-// node test/map_osm.mjs — osmToMap on a synthetic Overpass "out geom" response (no network).
+// node test/map_osm.mjs — osmToMap on synthetic Overpass and OSM XML data, plus the fetch layer on a mocked network.
 import { osmToMap, overpassQuery, areaBBox, specialFromTags, isHugeMap, OSM_ATTRIBUTION } from '../js/map/osm.js';
 import { validateMap, mapStats } from '../js/map/format.js';
 import { pointInPoly } from '../js/util/geom.js';
@@ -133,6 +133,185 @@ ok(Math.abs((bb.n - bb.s) * ky - 2000) < 1 && Math.abs((bb.e - bb.w) * kx - 2000
 }
 // empty response still yields a valid (blank) map
 ok(validateMap(osmToMap({ elements: [] }, { lat: 0, lon: 0, sizeKm: 0.5 })).ok, 'empty area still valid');
+
+// ---------------------------------------------------------------- new paths: files, cache, failover, tiles, cut outlines
+{
+  const { parseOsmText, parseOsmXml } = await import('../js/map/osmfile.js');
+  const { importPlace, fetchArea, planTiles, fileSquare, NET, resetMirrorHealth, rankMirrors, OVERPASS_MIRRORS } = await import('../js/map/osm.js');
+  const { useMemoryCache, cacheList, cacheKey } = await import('../js/map/osmcache.js');
+  useMemoryCache();
+  Object.assign(NET, { hedgeMs: 40, firstByteMs: 120, firstByteMaxMs: 700, stallMs: 400, hardMs: 1500, backoffMs: [20, 40], roundCapMs: 500 });
+  OVERPASS_MIRRORS.splice(0, OVERPASS_MIRRORS.length, ...[0, 1, 2, 3, 4].map(i => `https://m${i}.test/api/interpreter`));
+
+  // OSM XML as openstreetmap.org Export writes it (double quotes) plus JOSM style (single quotes, deleted objects)
+  const n = (id, x, y) => { const g = ll(x, y); return `<node id="${id}" lat="${g.lat.toFixed(7)}" lon="${g.lon.toFixed(7)}"/>`; };
+  const b0 = ll(0, 1000), b1 = ll(1000, 0);
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="openstreetmap-cgimap">
+ <bounds minlat="${b0.lat.toFixed(7)}" minlon="${b0.lon.toFixed(7)}" maxlat="${b1.lat.toFixed(7)}" maxlon="${b1.lon.toFixed(7)}"/>
+ ${n(1, 400, 400)}${n(2, 440, 400)}${n(3, 440, 430)}${n(4, 400, 430)}${n(5, 0, 500)}${n(6, 1000, 500)}${n(7, 500, 0)}${n(8, 500, 1000)}
+ <node id='9' lat='${ll(420, 415).lat.toFixed(7)}' lon='${ll(420, 415).lon.toFixed(7)}'><tag k='amenity' v='police'/><tag k='name' v='Fish &amp; Chips Station'/></node>
+ <node id="10" lat="${ll(10, 10).lat}" lon="${ll(10, 10).lon}" visible="false"/>
+ <way id="1"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/><tag k="building" v="yes"/><tag k="building:levels" v="4"/></way>
+ <way id="2"><nd ref="5"/><nd ref="6"/><tag k="highway" v="primary"/><tag k="name" v="High &quot;Street&quot;"/></way>
+ <way id="3"><nd ref="7"/><nd ref="8"/><tag k="highway" v="footway"/><tag k="footway" v="sidewalk"/></way>
+ <way id='4' action='delete'><nd ref='5'/><nd ref='7'/><tag k='highway' v='motorway'/></way>
+ <relation id="5"><member type="way" ref="1" role="outer"/><member type="way" ref="99" role="outer"/><tag k="type" v="multipolygon"/></relation>
+</osm>`;
+  const px = parseOsmXml(xml);
+  ok(px.bounds && px.elements.filter(e => e.type === 'way').length === 3 && !px.elements.some(e => e.id === 10 && e.type === 'node'), 'xml: bounds, ways, deleted/invisible skipped');
+  ok(px.elements.find(e => e.type === 'node' && e.id === 9).tags.name === 'Fish & Chips Station', 'xml: entities and single quotes');
+  ok(px.elements.find(e => e.type === 'relation').members.length === 2, 'xml: relation members');
+  const sq = fileSquare(px.bounds);
+  ok(Math.abs(sq.lat - LAT) < 1e-4 && Math.abs(sq.lon - LON) < 1e-4 && sq.maxKm === 1, 'file square from bounds');
+  const fx = await importPlace({ text: xml, stages: 3 });
+  ok(fx.source === 'file' && validateMap(fx.map).ok && fx.map.w === 1000, 'xml file import -> valid map');
+  ok(fx.map.buildings.length === 1 && fx.map.buildings[0].k === 'civic' && Math.abs(fx.map.buildings[0].h - 13.8) < 0.2, 'xml: building, levels and police POI');
+  ok(fx.map.roads.length === 1 && fx.map.roads[0].name === 'High "Street"', 'xml: sidewalk skipped, road kept');
+  // Overpass JSON file (the fixture above, without bounds)
+  const fj = await importPlace({ text: JSON.stringify(raw), stages: 4 });
+  ok(fj.source === 'file' && Math.abs(fj.map.buildings.length - map.buildings.length) <= 2 && Math.abs(fj.lat - LAT) < 0.002 && validateMap(fj.map).ok, 'overpass json file import');
+  let threw = '';
+  try { parseOsmText('{"format":"rcmap","v":1}'); } catch (e) { threw = e.message; }
+  ok(/Library/.test(threw), 'rcmap file sent to the library');
+  try { parseOsmText('hello'); threw = ''; } catch (e) { threw = e.message; }
+  ok(/Unknown file type/.test(threw), 'junk file refused');
+
+  // mocked network: per-host behaviour, counts in-flight requests
+  let inflight = 0, maxInflight = 0, calls = [];
+  const behave = {};
+  const body = (obj) => new Response(new ReadableStream({ start(c) { const s = JSON.stringify(obj); const enc = new TextEncoder(); c.enqueue(enc.encode(s.slice(0, 50))); c.enqueue(enc.encode(s.slice(50))); c.close(); } }), { status: 200 });
+  const mockFetch = (url, opts) => {
+    const hst = new URL(url).host, mode = behave[hst] || 'ok';
+    calls.push(hst);
+    inflight++; maxInflight = Math.max(maxInflight, inflight);
+    const done = () => { inflight--; };
+    return new Promise((res, rej) => {
+      const abort = () => { done(); rej(Object.assign(new Error('aborted'), { name: 'AbortError' })); };
+      if (opts.signal.aborted) return abort();
+      opts.signal.addEventListener('abort', abort, { once: true });
+      const reply = (r) => { opts.signal.removeEventListener('abort', abort); done(); res(r); };
+      if (mode === 'busy') setTimeout(() => reply(new Response('# 502 Gateway Timeout\nThis Overpass API server is currently at capacity.', { status: 502 })), 5);
+      else if (mode === 'remark') setTimeout(() => reply(body({ elements: [], remark: 'runtime error: Query timed out in "query" at line 3 after 61 seconds.' })), 5);
+      else if (mode === 'slow') setTimeout(() => reply(body(raw)), 260);
+      else if (mode === 'ok') setTimeout(() => reply(body(raw)), 10);
+      // 'hang': never answers until aborted
+    });
+  };
+  const [M0, M1, M2, M3, M4] = OVERPASS_MIRRORS.map(u => new URL(u).host);
+  const reset = () => { resetMirrorHealth(); inflight = 0; maxInflight = 0; calls = []; for (const k in behave) delete behave[k]; };
+
+  // failover: busy -> hang -> ok; the hang is hedged around and cancelled
+  reset();
+  Object.assign(behave, { [M0]: 'busy', [M1]: 'hang', [M2]: 'ok' });
+  const ev = [];
+  let t = performance.now();
+  const r1 = await importPlace({ lat: LAT, lon: LON, sizeKm: 1, name: 'Mock', fetchImpl: mockFetch, onProgress: p => ev.push(p.phase) });
+  const dt = performance.now() - t;
+  ok(r1.source === 'network' && r1.map.buildings.length === map.buildings.length && r1.info.mirrors[0] === M2, 'failover reached the working mirror');
+  ok(calls.join(',') === [M0, M1, M2].join(','), 'mirrors tried in rank order: ' + calls.join(','));
+  ok(maxInflight <= 2 && inflight === 0, 'never more than 2 in flight, loser cancelled');
+  ok(ev.includes('retry') && ev.includes('convert') && dt < 400, 'retry reported, hedge kicked in quickly (' + Math.round(dt) + ' ms)');
+  ok(rankMirrors()[0] === OVERPASS_MIRRORS[2], 'session health ranks the good mirror first');
+
+  // cache: the same square again is instant and makes no request
+  calls = [];
+  const r2 = await importPlace({ lat: LAT + 0.00001, lon: LON, sizeKm: 1.1, name: 'Mock', fetchImpl: mockFetch });
+  ok(r2.source === 'cache' && calls.length === 0 && r2.map.buildings.length === r1.map.buildings.length, 'cache hit on rounded centre and size');
+  const cl = await cacheList();
+  ok(cl.length === 1 && cl[0].key === cacheKey(LAT, LON, 1) && cl[0].name === 'Mock' && cl[0].bytes > 0, 'cache list entry');
+
+  // a slow but working best mirror is not abandoned for worse ones
+  reset();
+  Object.assign(behave, { [M0]: 'slow', [M1]: 'hang', [M2]: 'hang', [M3]: 'hang', [M4]: 'hang' });
+  t = performance.now();
+  const r3 = await fetchArea({ lat: LAT, lon: LON, sizeKm: 1, fetchImpl: mockFetch });
+  ok(r3.info.mirrors[0] === M0 && maxInflight <= 2 && inflight === 0, 'slow first mirror kept, hedges rotated: ' + calls.join(','));
+
+  // runtime-error remark counts as a failure
+  reset();
+  Object.assign(behave, { [M0]: 'remark', [M1]: 'ok' });
+  const r4 = await fetchArea({ lat: LAT, lon: LON, sizeKm: 1, fetchImpl: mockFetch });
+  ok(r4.info.mirrors[0] === M1, 'server runtime error -> next mirror');
+
+  // everything busy: rounds with backoff, then an honest error naming every mirror
+  reset();
+  for (const hh of [M0, M1, M2, M3, M4]) behave[hh] = 'busy';
+  let err = null;
+  try { await fetchArea({ lat: LAT, lon: LON, sizeKm: 1, fetchImpl: mockFetch }); } catch (e) { err = e; }
+  ok(err && /No map server/.test(err.message) && /at capacity/.test(err.message) && [M0, M1, M2, M3, M4].every(hh => err.message.includes(hh)), 'all-busy error lists mirrors');
+  ok(calls.length === 15, 'three rounds of five mirrors (' + calls.length + ')');
+
+  // cancel
+  reset();
+  for (const hh of [M0, M1, M2, M3, M4]) behave[hh] = 'hang';
+  const ctl = new AbortController();
+  setTimeout(() => ctl.abort(), 60);
+  err = null;
+  try { await importPlace({ lat: LAT, lon: LON + 0.01, sizeKm: 1, fetchImpl: mockFetch, signal: ctl.signal }); } catch (e) { err = e; }
+  await new Promise(r => setTimeout(r, 5));
+  ok(err && /cancelled/i.test(err.message) && inflight === 0, 'cancel aborts every request');
+
+  // nobody answers at all: the last ones are dropped after firstByteMaxMs, no endless wait
+  reset();
+  for (const hh of [M0, M1, M2, M3, M4]) behave[hh] = 'hang';
+  t = performance.now();
+  err = null;
+  try { await fetchArea({ lat: LAT, lon: LON + 0.02, sizeKm: 1, fetchImpl: mockFetch }); } catch (e) { err = e; }
+  ok(err && /no answer/.test(err.message) && inflight === 0 && maxInflight <= 2 && performance.now() - t < 3000, 'silent servers give up in bounded time (' + Math.round(performance.now() - t) + ' ms)');
+
+  // tiles: 4 km -> 2x2 parts, de-duplicated, still at most 2 in flight
+  reset();
+  ok(planTiles(LAT, LON, 2).length === 1 && planTiles(LAT, LON, 2.5).length === 4 && planTiles(LAT, LON, 4).length === 4, 'tile plan');
+  const r5 = await fetchArea({ lat: LAT, lon: LON, sizeKm: 4, fetchImpl: mockFetch });
+  ok(calls.length === 4 && maxInflight <= 2 && r5.elements.length === raw.elements.length && r5.info.tiles === 4, 'tiled fetch merges parts');
+
+  // a part that fails for real is reported as such, not as the cancel it causes in the part still streaming
+  let nCall = 0;
+  const partFail = (url, opts) => {
+    if (nCall++ === 0) {
+      return Promise.resolve(new Response(new ReadableStream({ start(c) {
+        const s = JSON.stringify(raw), enc = new TextEncoder();
+        c.enqueue(enc.encode(s.slice(0, 50)));
+        const tm = setTimeout(() => { try { c.enqueue(enc.encode(s.slice(50))); c.close(); } catch (e) { /* aborted */ } }, 300);
+        opts.signal.addEventListener('abort', () => { clearTimeout(tm); try { c.error(opts.signal.reason); } catch (e) { /* closed */ } });
+      } }), { status: 200 }));
+    }
+    return new Promise(res => setTimeout(() => res(new Response('bad', { status: 400 })), 5));
+  };
+  reset();
+  err = null;
+  try { await fetchArea({ lat: LAT + 0.03, lon: LON, sizeKm: 4, fetchImpl: partFail }); } catch (e) { err = e; }
+  ok(err && !err.cancelled && /rejected/.test(err.message), 'failed part reported, not as cancelled');
+}
+
+// cut outlines: a lake relation cropped by the box (null geometry outside), members in arbitrary directions
+{
+  // Overpass 'out geom(bbox)': coordinates outside the crop box are null, except next to a point inside it
+  const geomC = (pts) => {
+    const inside = []; for (let i = 0; i < pts.length; i += 2) inside.push(!(pts[i] < -40 || pts[i + 1] < -40 || pts[i] > 1040 || pts[i + 1] > 1040));
+    return inside.map((v, k) => (v || inside[k - 1] || inside[k + 1] ? ll(pts[2 * k], pts[2 * k + 1]) : null));
+  };
+  // lake = everything east of x ~ 610 (a big polygon that extends far outside the square)
+  const lake = [600, -3000, 4000, -3000, 4000, 4000, 600, 4000, 605, 1100, 610, 1020, 620, 600, 610, -20, 605, -100, 600, -3000];
+  const half1 = lake.slice(0, 8), half2 = lake.slice(6);
+  const mk = (rev) => {
+    const e = [];
+    const m2 = rev ? revPts(half2) : half2;
+    e.push({ type: 'relation', id: 1, bounds: { minlat: ll(0, 4000).lat, minlon: ll(600, 0).lon, maxlat: ll(0, -3000).lat, maxlon: ll(4000, 0).lon },
+      tags: { type: 'multipolygon', natural: 'water' }, members: [
+        { type: 'way', ref: 1, role: 'outer', geometry: geomC(half1) },
+        { type: 'way', ref: 2, role: 'outer', geometry: geomC(m2) }] });
+    let id = 10;
+    for (let x = 100; x < 560; x += 60) for (let y = 100; y < 900; y += 60) e.push({ type: 'way', id: id++, tags: { building: 'house' }, geometry: geom(rect(x, y, x + 20, y + 20).concat([x, y])) });
+    return { elements: e };
+  };
+  for (const rev of [false, true]) {
+    const m = osmToMap(mk(rev), { lat: LAT, lon: LON, sizeKm: 1, stages: 3 });
+    const wet = (x, y) => m.water.some(w => pointInPoly(w.p, x, y));
+    ok(wet(800, 500) && wet(900, 100) && !wet(300, 500) && !wet(580, 200), `cropped lake closed on the water side (member reversed: ${rev})`);
+  }
+}
 
 console.log(`map_osm: ${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

@@ -316,16 +316,29 @@ export async function joinWithCode(code, opts = {}) {
 // ---------------------------------------------------------------- in-memory link pair (tests, single-machine play)
 
 class LoopLink extends CoopLink {
-  constructor(role, opts) { super(role); this.peer = null; this.latency = opts.latency || 0; this.jitter = opts.jitter || 0; this._last = 0; this._q = 0; this._rand = opts.rand || Math.random; }
+  constructor(role, opts) { super(role); this.peer = null; this.latency = opts.latency || 0; this.jitter = opts.jitter || 0; this._last = 0; this._q = 0; this._rand = opts.rand || Math.random; this._out = []; }
+  // One FIFO and one timer: separate timers per message can fire out of order on a busy machine,
+  // because each delay is measured from a different moment.
   _sendRaw(data) {
     const peer = this.peer;
     if (!peer || !peer.open) throw new Error('peer closed');
     const copy = typeof data === 'string' ? data : (data instanceof Uint8Array ? data.slice() : new Uint8Array(data).slice());
     const at = Math.max(this._last, clock() + this.latency + this.jitter * this._rand());
     this._last = at;
-    this._q += typeof data === 'string' ? data.length : copy.length;
     const size = typeof data === 'string' ? data.length : copy.length;
-    setTimeout(() => { this._q -= size; if (peer.open) peer._receive(copy); }, Math.max(0, at - clock()));
+    this._q += size;
+    this._out.push([at, copy, size]);
+    if (this._out.length === 1) this._arm();
+  }
+  _arm() { if (this._out.length) setTimeout(() => this._deliver(), Math.max(0, this._out[0][0] - clock())); }
+  _deliver() {
+    const q = this._out, peer = this.peer;
+    while (q.length && q[0][0] <= clock() + 1) {
+      const [, d, size] = q.shift();
+      this._q -= size;
+      if (peer && peer.open) peer._receive(d);
+    }
+    this._arm();
   }
   _buffered() { return this._q; }
   _drain() { return new Promise(res => { const t = setInterval(() => { if (this._q <= LOW_WATER || !this.open) { clearInterval(t); res(); } }, 5); }); }

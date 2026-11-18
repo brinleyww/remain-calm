@@ -42,7 +42,7 @@ function normalise(s) {
   const vol = Math.max(0, Math.min(1, num(s.volume, 0.7))) * Math.max(0, Math.min(1, num(s.sfxVolume, 1)));
   return {
     volume: vol,
-    popScale: Math.max(0.02, Math.min(2, num(s.popScale, 0.35))),
+    popScale: Math.max(0.02, Math.min(2, num(s.popScale, 1))),
     autoPause: (s.autoPauseOnOutbreak ?? s.autoPause ?? true) !== false,
     showTips: (s.showTips ?? true) !== false,
     uiScale: Math.max(0.7, Math.min(1.6, num(s.uiScale, 1))),

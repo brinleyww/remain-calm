@@ -6,6 +6,7 @@ import { Camera } from '../render/camera.js';
 import { getPalette, applyPalette, rgba } from '../render/palette.js';
 import { drawStatic, drawScaleBar, invalidate, invalidateBuilding, invalidateBridge, pickBuilding, pickBridge } from '../render/maprender.js';
 import { WorldRenderer } from '../render/worldrender.js';
+import { Expand } from '../render/expand.js';
 import { Markers, tag } from '../render/fx.js';
 import { pointInPoly, distToPolyline, polyCentroid } from '../util/geom.js';
 import { KIND_LABEL, KIND_TAG } from '../map/format.js';
@@ -116,6 +117,7 @@ export class Session {
     if (this.destroyed) return;
     this.destroyed = true;
     cancelAnimationFrame(this.raf);
+    if (this.expand) { this.expand.cancel(); this.expand = null; }
     if (this.input) this.input.detach();
     if (this._ro) this._ro.disconnect();
     for (const off of this._offs) off();
@@ -414,15 +416,25 @@ export class Session {
     if (!r || !r.won || r.last) return;
     if (this.driver && !this._fromNet) { this.issue({ t: 'session.next' }); return; }
     this.closeTransient();
+    const from = w.region.poly;
     w.beginStage(w.stage + 1);
     this.stageSnap = w.snapshot();
     this.readySnap = null;
     this.afterStageReset();
-    this.fitStage(true);
-    this.stageIntro();
+    try {
+      const ex = new Expand(this, from, () => { if (this.expand === ex) this.expand = null; this.stageIntro(); });
+      this.expand = ex;
+      this.fitStage(true, ex.camSec);
+    } catch (e) {
+      console.warn('[session] stage growth animation failed', e);
+      this.expand = null;
+      this.fitStage(true);
+      this.stageIntro();
+    }
   }
 
   afterStageReset() {
+    if (this.expand) { this.expand.cancel(); this.expand = null; }
     this.undoStack = [];
     this.paused = false;
     this.slowUntil = 0;
@@ -448,6 +460,7 @@ export class Session {
   }
 
   quit(reason = 'quit') {
+    if (this.expand) { this.expand.cancel(); this.expand = null; }
     const summary = {
       reason, mode: this.opts.mode, map: this.map.name || '', stage: this.world.stage, stageCount: this.world.stageCount,
       results: this.results.slice(), retries: this.retries, difficulty: this.world.difficulty,
@@ -558,11 +571,24 @@ export class Session {
     } else showQuickSettings(this);
   }
 
-  openPause() { if (!this.modalOpen()) showPause(this); }
+  openFeedback() {
+    if (typeof this.opts.openFeedback !== 'function' || this.modalOpen()) return;
+    this._feedbackOpen = true;
+    const wasPaused = this.paused;
+    if (this.world.phase === 'battle' && !this.net) this.paused = true;
+    try { this.opts.openFeedback(() => { this._feedbackOpen = false; this.paused = wasPaused; }); } catch (e) { this._feedbackOpen = false; this.paused = wasPaused; console.error(e); }
+  }
+
+  openPause() {
+    if (this.modalOpen()) return;
+    const m = showPause(this);
+    const list = typeof this.opts.openFeedback === 'function' && m && m.body.querySelector('.vstack');
+    if (list) list.insertBefore(button('Send feedback', () => { m.close(); this.openFeedback(); }, { cls: 'btn-block' }), list.querySelector('.btn-ghost'));
+  }
   openRefundPanel(items) { openRefundPanel(this, items); }
-  modalOpen() { return this.modals.length > 0 || !!this._loadoutOpen || !!this._settingsOpen; }
+  modalOpen() { return this.modals.length > 0 || !!this._loadoutOpen || !!this._settingsOpen || !!this._feedbackOpen; }
   blocked() { return this.modalOpen(); }
-  externalOverlay() { return !!(this._loadoutOpen || this._settingsOpen); }
+  externalOverlay() { return !!(this._loadoutOpen || this._settingsOpen || this._feedbackOpen); }
   modalKey(e) {
     const m = this.modals[this.modals.length - 1];
     return m ? m.key(e) : false;
@@ -764,12 +790,12 @@ export class Session {
     return { x: L, y: LAYOUT.top, w: Math.max(200, cam.w - L - R), h: Math.max(160, cam.h - LAYOUT.top - LAYOUT.bottom) };
   }
 
-  fitStage(smooth = true) {
+  fitStage(smooth = true, sec = 0.6) {
     const cam = this.cam, bb = this.world.region.bbox, v = this.viewRect();
     const z = Math.max(cam.minZoom, Math.min(cam.maxZoom, cam.fitZoom(bb, 16, v.w, v.h)));
     const offX = (v.x + v.w / 2 - cam.w / 2) / z, offY = (v.y + v.h / 2 - cam.h / 2) / z;
     const cx = (bb[0] + bb[2]) / 2 - offX, cy = (bb[1] + bb[3]) / 2 - offY;
-    if (smooth) cam.flyTo(cx, cy, z, 0.6); else cam.centerOn(cx, cy, z);
+    if (smooth) cam.flyTo(cx, cy, z, sec); else cam.centerOn(cx, cy, z);
   }
 
   resize() {
@@ -814,6 +840,7 @@ export class Session {
   tick(real) {
     const w = this.world;
     this.cam.update(real);
+    if (this.expand) this.expand.update(real);
     this.input.update(real);
     let steps = 0;
     const t0 = performance.now();
@@ -855,11 +882,13 @@ export class Session {
     const w = this.world, ctx = this.ctx, dpr = this.dpr || 1, cam = this.cam, pal = this.pal;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const hb = this.hover && this.hover.kind === 'building' ? this.hover.b : null;
-    drawStatic(ctx, this.map, w.grid, cam, { palette: pal, view: this.view, stageMask: w.region.poly, world: w, hover: hb });
+    const ex = this.expand && this.expand.active ? this.expand : null;
+    drawStatic(ctx, this.map, w.grid, cam, { palette: pal, view: this.view, stageMask: ex ? ex.mask() : w.region.poly, stageLine: !ex || ex.lineDone, budgetMs: ex ? 3 : undefined, world: w, hover: hb });
     const live = w.phase === 'battle' && !this.paused && !this.modalOpen();
     const ext = live ? (this.driver ? 0 : this.acc) : 0;
     const t = w.t + ext + (this.fxT || 0);
-    const flash = this.wr.draw(ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: this.hover, abilityName: (id) => this.combat.abilityName(id) });
+    const flash = this.wr.draw(ex ? ex.beginWorld(ctx) : ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: this.hover, abilityName: (id) => this.combat.abilityName(id) });
+    if (ex) ex.endWorld(ctx);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.markers.draw(ctx, cam, t, this.rt, pal);
     (this.input.gesture || this.tool).draw(ctx, cam, pal);

@@ -105,13 +105,15 @@ export class ZoneTool extends Tool {
     if (!this.pts.length && s.world.phase === 'planning') drawCornerHandles(ctx, s, cam, pal);
     if (!this.pts.length || !this.hover) return;
     const e = this.hover, closing = this.nearFirst(e);
+    const p = closing ? this.pts.slice() : [...this.pts, e.wx, e.wy];
     ctx.save();
     ctx.beginPath();
-    for (let k = 0; k < this.pts.length; k += 2) { const [x, y] = toScreen(cam, this.pts[k], this.pts[k + 1]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
-    if (!closing) ctx.lineTo(e.sx, e.sy);
+    for (let k = 0; k < p.length; k += 2) { const [x, y] = toScreen(cam, p[k], p[k + 1]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
     ctx.closePath();
     ctx.fillStyle = rgba(pal.zone.wall, 0.12); ctx.fill();
-    ctx.strokeStyle = pal.zone.wall; ctx.lineWidth = 3; ctx.stroke();
+    // the wall it will build: the outline outside existing zones, in the built-wall line style
+    const lines = p.length >= 6 ? s.wr.zoneOutlinePreview(s.world, p) : [{ p, closed: false }];
+    s.wr.drawWallPreview(ctx, cam, s.world.grid.cell, lines, 0, 0.75);
     ctx.strokeStyle = pal.ink; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
     for (let k = 0; k < this.pts.length; k += 2) {
       const [x, y] = toScreen(cam, this.pts[k], this.pts[k + 1]);
@@ -172,11 +174,13 @@ export class CornerDrag {
     return { title: 'MOVE CORNER', ok: !!q.ok, cost: Math.max(0, q.cost || 0), reason: q.ok ? '' : q.reason, note: q.ok && q.cost < 0 ? `refund ${money(-q.cost)}` : '' };
   }
   draw(ctx, cam, pal) {
+    const s = this.s, bad = this.q && !this.q.ok;
+    s.wr.drawWallPreview(ctx, cam, s.world.grid.cell, s.wr.zoneOutlinePreview(s.world, this.p, this.id), 0, 0.75, bad ? pal.stamp : null);
     ctx.save();
     ctx.beginPath();
     for (let k = 0; k < this.p.length; k += 2) { const [x, y] = toScreen(cam, this.p[k], this.p[k + 1]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
     ctx.closePath();
-    ctx.strokeStyle = this.q && !this.q.ok ? pal.stamp : pal.zone.wall; ctx.lineWidth = 2.5; ctx.setLineDash([6, 3]); ctx.stroke();
+    ctx.strokeStyle = bad ? pal.stamp : pal.ink; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.stroke();
     const [x, y] = toScreen(cam, this.p[this.j], this.p[this.j + 1]);
     ctx.setLineDash([]); ctx.fillStyle = pal.zone.wall; ctx.fillRect(x - 4, y - 4, 8, 8);
     ctx.restore();
@@ -226,13 +230,10 @@ export class WallTool extends Tool {
   }
   draw(ctx, cam, pal) {
     if (!this.pts.length || !this.hover) return;
+    const p = [...this.pts, this.hover.wx, this.hover.wy];
+    const path = this.s.wr.drawWallPreview(ctx, cam, this.world.grid.cell, [{ p, closed: false }], 1, 0.75, this.q && this.q.ok === false ? pal.stamp : null);
     ctx.save();
-    ctx.beginPath();
-    for (let k = 0; k < this.pts.length; k += 2) { const [x, y] = toScreen(cam, this.pts[k], this.pts[k + 1]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
-    ctx.lineTo(this.hover.sx, this.hover.sy);
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    ctx.strokeStyle = pal.zone.standalone; ctx.lineWidth = Math.max(3, 6 * cam.zoom); ctx.globalAlpha = 0.7; ctx.stroke();
-    ctx.globalAlpha = 1; ctx.strokeStyle = pal.ink; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.stroke();
+    ctx.strokeStyle = pal.ink; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.stroke(path);
     ctx.restore();
   }
 }
@@ -264,20 +265,26 @@ export class GateTool extends Tool {
     if (!e) return null;
     const sn = this.snap(e);
     const q = this.quote({ t: 'gate.add', x: e.wx, y: e.wy }, sn ? `${sn[0]}|${sn[1]}|${this.world.zones.gates.length}` : 'none');
-    return this.base('GATE', q, sn ? 'civilians enter here' : 'point at a safe-zone wall');
+    const warn = q && q.ok && q.warn ? q.warn.toLowerCase() : '';
+    return this.base('GATE', q, !sn ? 'point at a safe-zone wall' : warn ? 'warning: ' + warn : 'civilians enter here');
   }
   draw(ctx, cam, pal) {
     const e = this.hover;
     if (!e) return;
     const sn = this.snap(e);
     if (!sn) return;
-    const [x, y] = toScreen(cam, sn[0], sn[1]);
-    const r = Math.max(5, this.cfg.gate.width * 0.5 * cam.zoom);
-    ctx.save();
-    ctx.strokeStyle = this.q && this.q.ok === false ? pal.stamp : pal.ink;
-    ctx.lineWidth = 1.5; ctx.setLineDash([3, 2]);
-    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
-    ctx.restore();
+    // the gate as a straight piece of the wall line: the quoted segment when the sim gives one, else the nearest edge
+    const q = this.q, wr = this.s.wr;
+    let geo = null;
+    if (q && Number.isFinite(q.x0) && Number.isFinite(q.x1)) geo = { ax: q.x0, ay: q.y0, bx: q.x1, by: q.y1 };
+    else {
+      const w = wr.nearestZoneWall(this.world, e.wx, e.wy, this.world.grid.cell * 3), hw = this.cfg.gate.width * 0.5;
+      if (w) geo = { ax: w.x - w.ux * hw, ay: w.y - w.uy * hw, bx: w.x + w.ux * hw, by: w.y + w.uy * hw };
+    }
+    if (!geo) return;
+    const L = Math.hypot(geo.bx - geo.ax, geo.by - geo.ay) || 1;
+    geo.nx = -(geo.by - geo.ay) / L; geo.ny = (geo.bx - geo.ax) / L;
+    wr.drawGate(ctx, cam, geo, q && (q.ok === false || q.warn) ? pal.stamp : pal.ink, false, 0.9);
   }
 }
 

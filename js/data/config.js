@@ -3,14 +3,17 @@
 // Everything here can be overridden by mutators ("mods"): text lines "path.to.key=value"; later lines win.
 
 export const DEFAULTS = {
-  sim: { dt: 0.05, cell: 4, coarse: 8, hashCell: 8, maxAgents: 90000, civFieldEvery: 1.0, scentEvery: 1.0 },
+  sim: { dt: 0.05, cell: 4, coarse: 8, hashCell: 8, maxAgents: 250000, civFieldEvery: 1.0, scentEvery: 1.0 },
 
   // Nominal population (drives economy) = building footprint m2 * perM2 * kindMul.
   // Spawned civilians = nominal * scale (performance setting), capped by sim.maxAgents.
-  population: { perM2: 0.02, scale: 0.35, kindMul: { res: 1, com: 0.8, ind: 0.3, civic: 0.5, trade: 0.6, armory: 0.3, rescue: 0.5, hazard: 0.2, landmark: 0.6 }, packSize: [6, 30], packSpread: 10 },
+  // At scale 1 homes, shops and offices hold the reference 0.02 people per m2 of footprint.
+  population: { perM2: 0.02, scale: 1.0, kindMul: { res: 1, com: 1, ind: 0.5, civic: 0.8, trade: 0.9, armory: 0.5, rescue: 0.8, hazard: 0.2, landmark: 0.8 }, packSize: [2, 10], packSpread: 6 },
 
-  civ: { walk: 1.3, run: 2.0, panicRadius: 30, panicSpreadRadius: 14, panicSpreadChance: 0.3, panicThreshold: 0.5, calmDecayPerSec: 0.02,
-         gateLureRadius: 140, broadcastRadius: 600, wander: 1.0, seekMaxPath: 2500, separation: 0.9 },
+  civ: { walk: 1.3, run: 2.0, panicRadius: 30, panicSpreadRadius: 14, panicSpreadChance: 0.3, panicSpreadMin: 0.8, panicThreshold: 0.5, calmDecayPerSec: 0.02,
+         gateLureRadius: 350, broadcastRadius: 600, wander: 1.0, seekMaxPath: 8000, separation: 0.9,
+         // movement: gateLureRadius is a path distance; dangerCost per zombie (8 m cell, capped) and gate queues bend the civilian field
+         lureWalk: 1.35, awareRadius: 50, dangerCost: 8, dangerMax: 30, gateQueuePer: 8, gateQueueMax: 12, gateQueueRadius: 16, fieldEvery: 6 },
 
   zombie: { speed: 3.4, sight: 45, touchRadius: 3, hpStart: 1, hpGraceSec: 60, hpPerMin: 3, hpMax: 30,
             wallDps: 18, retargetSec: 0.5, swimSpeedMul: 0.5, turnSec: [2, 5], separation: 0.7, softlockSec: 60,
@@ -18,9 +21,9 @@ export const DEFAULTS = {
 
   scent: { wallCost: 6, gateCost: 4, rubbleCost: 2, parkCost: 1, waterCostSwimmer: 2 },
 
-  outbreak: { perKm2: 2.15, minSites: 1, maxSites: 9, radius: 105, zombies: 200, zombiesPerLevel: 40, zombieScaleWithPop: true,
+  outbreak: { perKm2: 2.15, minSites: 1, maxSites: 9, radius: 105, zombies: 70, zombiesPerLevel: 14, zombieScaleWithPop: true,
               minDistFromZone: 120, secondaryChancePerLevel: 0.12, secondaryAfterSec: [90, 200],
-              edgeWaves: 0, edgeWaveEvery: 60, edgeWaveZombies: 60, edgeWaveCount: 5 },
+              edgeWaves: 0, edgeWaveEvery: 60, edgeWaveZombies: 21, edgeWaveCount: 5 },
 
   mutation: { firstSec: 70, intervalSec: [45, 80], pitRadius: 30, pitSec: 20, pitMin: 10, pitAttract: 120,
     kinds: {
@@ -32,7 +35,7 @@ export const DEFAULTS = {
 
   zone: { baseCost: 100, freeZones: 4, maxZones: 8, maxLandFrac: 0.30, minCorners: 3, bldgInsideFrac: 0.5, bigBldgArea: 2000, bigBldgInsideFrac: 1.0,
           outsideCostMul: 1.5, outsideStartDelay: 12 },
-  wall: { baseCost: 25, perM: 0.75, hp: 1200, standaloneMaxM: 300, standalonePerLevelM: 100, levelHpMul: [1, 2, 3], levelCost: [0, 150, 400] },
+  wall: { baseCost: 25, perM: 0.75, hp: 1200, standaloneMaxM: 300, standalonePerLevelM: 100, levelHpMul: [1, 2, 3], levelCost: [0, 150, 400], thick: 1.0 },
   gate: { cost: 50, width: 12, hp: 900 },
   corridor: { baseCost: 30, perM2: 0.0045, minWidth: 8, maxWidth: 120, defaultWidth: 30 },
   hold: { baseCost: 20, perM2: 0.002, innerFrac: 0.35, minR: 15, maxR: 250 },
@@ -83,11 +86,11 @@ export const DEFAULTS = {
                   shellSpeed: 120, paint: true, ups: [['splash', 1.3], ['stunSec', 1.4], ['rof', 1.3], ['range', 1.25]] },
     fireMortar: { mount: 'building', cost: 120, dmg: 6, splash: 14, fire: 1, minRange: 160, range: 600, rof: 5, mag: 4, reloads: 8, reloadSec: 12,
                   shellSpeed: 120, paint: true, ups: [['splash', 1.3], ['dmg', 1.5], ['rof', 1.3], ['range', 1.25]] },
-    mlrs:       { mount: 'ground', cost: 200, dmg: 30, splash: 14, rockets: 12, spread: 50, range: 900, minRange: 120, rof: 60, mag: 1, reloads: 6, reloadSec: 0,
+    mlrs:       { mount: 'ground', cost: 200, dmg: 30, splash: 14, rockets: 12, spread: 50, range: 900, minRange: 120, rof: 60, mag: 1, reloads: 6, reloadSec: 0, minCluster: 3,
                   shellSpeed: 220, hp: 800, ups: [['rockets', 1.5], ['dmg', 1.5], ['rof', 0.75], ['range', 1.3]] },
-    howitzer:   { mount: 'ground', cost: (w, n) => 400 + 200 * n, dmg: 60, splash: 20, range: 6500, minRange: 200, rof: 6, mag: 4, reloads: 10, reloadSec: 15,
+    howitzer:   { mount: 'ground', cost: (w, n) => 400 + 200 * n, dmg: 60, splash: 20, range: 6500, minRange: 200, rof: 6, mag: 4, reloads: 10, reloadSec: 15, minCluster: 3,
                   shellSpeed: 400, bldgDmg: 40, hp: 1000, ups: [['dmg', 1.5], ['splash', 1.3], ['rof', 1.3], ['reloads', 1.5]] },
-    battleship: { mount: 'water', minWaterM2: 20000, cost: (w, n) => 750 + 550 * n, dmg: 10, splash: 18, shells: 6, range: 1400, rof: 4, mag: Infinity, reloads: Infinity,
+    battleship: { mount: 'water', minWaterM2: 20000, cost: (w, n) => 750 + 550 * n, dmg: 10, splash: 18, shells: 6, range: 1400, rof: 4, mag: Infinity, reloads: Infinity, minCluster: 3,
                   shellSpeed: 300, bldgDmg: 30, unlimited: true, ups: [['shells', 1.5], ['dmg', 1.5], ['range', 1.25], ['rof', 1.3]] },
     railgun:    { mount: 'ground', cost: 600, dmg: 60, width: 3, range: 900, rof: 8, mag: 1, reloads: 12, reloadSec: 0, hp: 800,
                   ups: [['dmg', 1.5], ['range', 1.25], ['rof', 1.3], ['reloads', 1.5]] },
@@ -147,6 +150,12 @@ export const DEFAULTS = {
   },
 
   armed: { pursueLeash: 300, sight: 90, speed: 3.0, accuracy: 0.8 },
+
+  // How guns share out targets. A shooter's expected damage on a zombie counts as a claim for claimSec, so others pick
+  // someone else. Threat = 1 + threatMul * threatDist / (threatDist + metres of zombie path to the nearest person).
+  // Candidates: nearest zombies weighed per direct-fire scan (armed people: armedCand), blocks refined per artillery shot.
+  // Unit key minCluster: heavy guns skip groups smaller than this while a bigger one is in range.
+  targeting: { claimSec: 0.5, threatMul: 3, threatDist: 40, directCand: 24, armedCand: 10, artyCand: 5 },
 
   // Campaign unlock schedule: item ids unlocked when the given campaign stage is cleared (bronze+).
   // Free Play / Sandbox use everything that is unlocked (Sandbox: everything).

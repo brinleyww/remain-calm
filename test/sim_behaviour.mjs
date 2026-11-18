@@ -202,7 +202,7 @@ const killAll = (w, type) => { for (let i = 0; i < w.A.n; i++) if (w.A.type[i] =
   const victim = w.spawn(TYPE.CIV, b.cx + Math.sqrt(b.area) / 2 + 3, b.cy);
   const z = w.spawn(TYPE.ZOMBIE, b.cx + Math.sqrt(b.area) / 2 + 5, b.cy + 2);
   let ev = null;
-  w.events.on('collapse', (e) => { ev = e; });
+  w.events.on('collapse', (e) => { ev = ev || e; }); // the first one: a toppled neighbour may follow
   w.step();
   w.damageBuilding(b.idx, b.hpMax + 1, 'test', 1, 0);
   const info = w.grid.bInfo[b.idx];

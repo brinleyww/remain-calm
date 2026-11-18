@@ -78,8 +78,9 @@ export const PALETTES = {
     heightRamp: ['#E6DDC6', '#D8C49B', '#C9A26B', '#B0723F', '#8A4022', '#5A1F12'],
     agent: {
       civ: '#2B4A7A', civPanic: '#3F6FB0', zombie: '#B0341F', turning: '#8E4A3C',
-      explosive: '#E07B00', shielded: '#5A5A5A', swimmer: '#1F7F8F', giant: '#6E1408',
+      explosive: '#E8B800', shielded: '#7C8A93', swimmer: '#0B7F7A', giant: '#5A1208',
       police: '#1F3B5C', policeDot: '#FFFFFF', militia: '#7A5A1F', soldier: '#2F5D3A', outline: '#F6F1E4',
+      edge: 'rgba(30,28,24,.5)', markDark: '#1E1C18', markLight: '#F6F1E4',
     },
     zone: { wall: '#D9662B', fill: 'rgba(217,102,43,.10)', hatch: 'rgba(217,102,43,.35)', gate: '#1E1C18', breached: '#B3261E',
             corridor: '#C9962A', corridorFill: 'rgba(201,150,42,.12)', hold: '#1E1C18', holdFill: 'rgba(30,28,24,.06)', standalone: '#D9662B' },
@@ -110,8 +111,9 @@ export const PALETTES = {
     heightRamp: ['#2A6193', '#3E78A8', '#5D93BE', '#86B0D2', '#B5D0E4', '#E8F1F6'],
     agent: {
       civ: '#F1F5F6', civPanic: '#A8D4F2', zombie: '#FF7A5C', turning: '#E9A88F',
-      explosive: '#FFB547', shielded: '#C9CDD0', swimmer: '#6FE0D2', giant: '#FF4A2E',
+      explosive: '#FFE01A', shielded: '#B7C4CC', swimmer: '#5CF2DA', giant: '#FF5A3C',
       police: '#0E2A47', policeDot: '#FFFFFF', militia: '#E8C66E', soldier: '#9BD88A', outline: '#153656',
+      edge: 'rgba(11,34,56,.6)', markDark: '#0B2238', markLight: '#FFFFFF',
     },
     zone: { wall: '#F39A5B', fill: 'rgba(243,154,91,.12)', hatch: 'rgba(243,154,91,.4)', gate: '#EEF3F2', breached: '#F27A62',
             corridor: '#E8C15A', corridorFill: 'rgba(232,193,90,.14)', hold: '#EEF3F2', holdFill: 'rgba(238,243,242,.07)', standalone: '#F39A5B' },
@@ -142,8 +144,9 @@ export const PALETTES = {
     heightRamp: ['#2E2F29', '#4A4536', '#6C5D3E', '#977743', '#C29548', '#E8C46A'],
     agent: {
       civ: '#7FA3D8', civPanic: '#A9C6EF', zombie: '#E5553B', turning: '#C78B78',
-      explosive: '#F09A2A', shielded: '#A7A7A7', swimmer: '#4FB8C4', giant: '#C2391F',
+      explosive: '#F5D33B', shielded: '#A9B4BC', swimmer: '#38C9C0', giant: '#E64A2C',
       police: '#D8E2EE', policeDot: '#1E2A3A', militia: '#C9A24E', soldier: '#7FB57F', outline: '#0E0F0D',
+      edge: 'rgba(0,0,0,.55)', markDark: '#0E0F0D', markLight: '#F2EBD6',
     },
     zone: { wall: '#E8823F', fill: 'rgba(232,130,63,.10)', hatch: 'rgba(232,130,63,.35)', gate: '#E4DCC6', breached: '#E0574A',
             corridor: '#D9AE4A', corridorFill: 'rgba(217,174,74,.12)', hold: '#E4DCC6', holdFill: 'rgba(228,220,198,.06)', standalone: '#E8823F' },

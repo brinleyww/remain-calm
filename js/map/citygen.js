@@ -33,7 +33,8 @@ export function generateCity(options = {}) {
   const o = normalizeCityOptions(options);
   const W = Math.round(o.sizeKm * 1000), H = W;
   const ctx = {
-    o, W, H, S: o.sizeKm, rng: new Rng(o.seed),
+    // dens: the build-up the generator works with; the slider's 0% still gives a loose town, 100% a packed core
+    o, W, H, S: o.sizeKm, rng: new Rng(o.seed), dens: 0.3 + 0.7 * o.density,
     occ: makeOcc(W, H, OCC_CELL),
     roads: [], parks: [], buildings: [], reserves: [], ponds: [], extraWater: [], cands: [],
   };
@@ -57,6 +58,7 @@ export function generateCity(options = {}) {
   pocketParks(ctx);
   placeFrontage(ctx);
   fillYards(ctx);
+  infillBlocks(ctx);
   assignSpecials(ctx);
   const levels = buildStages(ctx);
   ensureStageSpecials(ctx, levels);
@@ -621,9 +623,9 @@ function chooseCentre(ctx) {
     if (s > bs) { bs = s; best = [x, y]; }
   }
   [ctx.cx, ctx.cy] = best || [W / 2, H / 2];
-  const d = o.density;
-  ctx.Rd = (110 + 100 * S) * (0.65 + 0.7 * d);
-  ctx.Rmid = ctx.Rd + (200 + 130 * S) * (0.4 + 0.9 * d);
+  const d = ctx.dens;
+  ctx.Rd = (140 + 120 * S) * (0.65 + 0.7 * d);
+  ctx.Rmid = ctx.Rd + (300 + 230 * S) * (0.4 + 0.9 * d);
   ctx.hTop = 40 + (60 + 120 * d) * Math.min(1, 0.35 + 0.2 * S);
   ctx.theta0 = rng.range(-Math.PI / 4, Math.PI / 4);
   const a = ctx.Rd * rng.range(1.0, 1.2), b = ctx.Rd * rng.range(0.72, 0.92), ch = Math.min(a, b) * rng.range(0.2, 0.38);
@@ -796,7 +798,7 @@ function planDistricts(ctx) {
     if (d.d < Rmid) {
       d.zone = MID; d.style = 'grid';
       d.theta = ctx.theta0 + (rng.chance(0.5) ? 0 : rng.range(-0.3, 0.3));
-      d.sA = rng.range(68, 92); d.sB = rng.range(95, 140); d.drop = 0.08;
+      d.sA = rng.range(76, 100); d.sB = rng.range(104, 150); d.drop = 0.11;
     } else {
       d.zone = SUB;
       const r = rng.next();
@@ -846,15 +848,18 @@ function planDistricts(ctx) {
 
 // ================================================================= streets (unwarped plan)
 
-const LOC_W = { [DT]: 10, [MID]: 8.5, [OLD]: 6, [SUB]: 7, [IND]: 10, [PRK]: 3 };
+const LOC_W = { [DT]: 9.5, [MID]: 8, [OLD]: 6, [SUB]: 6.5, [IND]: 10, [PRK]: 3 };
 
 function layStreets(ctx) {
   const rng = ctx.rng.fork('streets');
   const R = ctx.uroads = [];
   const dt = ctx.dtPoly;
   ctx.doneGroups = new Set();
-  R.push({ p: closeRing(dt.p), w: 16, k: 'major', cls: 'ring', name: ctx.names.street(true) });
-  const dtd = { poly: dt, zone: DT, theta: ctx.theta0, sA: rng.range(78, 100), sB: rng.range(95, 128), drop: 0.04, aveEvery: rng.int(3, 4), requests: ctx.dtReq, minus: [] };
+  // small sheets get narrower trunk roads, so the few big roads do not eat the town
+  const trunk = clamp(0.8 + 0.1 * ctx.S, 0.9, 1);
+  ctx.trunk = trunk;
+  R.push({ p: closeRing(dt.p), w: 16 * trunk, k: 'major', cls: 'ring', name: ctx.names.street(true) });
+  const dtd = { poly: dt, zone: DT, theta: ctx.theta0, sA: rng.range(86, 110), sB: rng.range(104, 140), drop: 0.04, aveEvery: rng.int(3, 4), requests: ctx.dtReq, minus: [] };
   gridStreets(ctx, dtd, rng);
   for (const d of ctx.districts) {
     for (let k = 0; k < d.verts.length; k++) {
@@ -863,7 +868,7 @@ function layStreets(ctx) {
       const e = ctx.districts[j];
       if (d.style === 'none' && e.style === 'none') continue;
       const w = d.verts[(k + 1) % d.verts.length];
-      const nm = ctx.names.street(true), wid = rng.range(12, 15);
+      const nm = ctx.names.street(true), wid = rng.range(12, 15) * trunk;
       for (const piece of clipPolyline([v.x, v.y, w.x, w.y], null, [dt])) if (polyLen(piece) > 4) R.push({ p: piece, w: wid, k: 'major', cls: 'art', name: nm });
     }
   }
@@ -957,7 +962,7 @@ function gridStreets(ctx, d, rng) {
       const n = amp ? Math.max(2, Math.ceil((ubb - ua) / 14)) : 1;
       for (let q = 0; q <= n; q++) { const u = lerp(ua, ubb, q / n); pts.push(...toW(u, vs[k] + wv(u))); }
       if (isPath) emit(pts, 3, 'path', 'path');
-      else if (isAve(k)) emit(pts, 15, 'major', 'ave', nm);
+      else if (isAve(k)) emit(pts, 15 * ctx.trunk, 'major', 'ave', nm);
       else emit(pts, locW, 'minor', 'loc', nm);
     });
   }
@@ -966,7 +971,7 @@ function gridStreets(ctx, d, rng) {
     runs(keepB[j], pathB[j], NA, (k0, k1, isPath) => {
       const pts = [...toW(us[j], vb[k0]), ...toW(us[j], vb[k1 + 1])];
       if (isPath) emit(pts, 3, 'path', 'path');
-      else if (isAve(j)) emit(pts, 15, 'major', 'ave', nm);
+      else if (isAve(j)) emit(pts, 15 * ctx.trunk, 'major', 'ave', nm);
       else emit(pts, locW, 'minor', 'loc', nm);
     });
   }
@@ -1205,7 +1210,7 @@ function stampRoads(ctx, roads) {
   const occ = ctx.occ;
   for (const r of roads) {
     if (r.k === 'rail') continue;
-    const side = r.cls === 'path' ? 0.5 : zoneAt(ctx, r.p[0], r.p[1]) === DT ? 3 : 2;
+    const side = r.cls === 'path' ? 0.5 : zoneAt(ctx, r.p[0], r.p[1]) === DT ? 2.5 : 1.8;
     stampLine(occ, r.p, r.w + side * 2, ROAD, r.k === 'bridge' ? 0 : 2);
   }
 }
@@ -1495,8 +1500,8 @@ function pickShape(rng, zone, tower) {
   const r = rng.next();
   if (tower) return r < 0.5 ? 'rect' : r < 0.7 ? 'chamfer' : r < 0.82 ? 'stepped' : r < 0.88 ? 'L' : r < 0.94 ? 'octagon' : r < 0.97 ? 'round' : 'cross';
   switch (zone) {
-    case DT: return r < 0.5 ? 'rect' : r < 0.64 ? 'L' : r < 0.74 ? 'U' : r < 0.86 ? 'notch' : 'chamfer';
-    case MID: return r < 0.52 ? 'rect' : r < 0.72 ? 'L' : r < 0.82 ? 'U' : r < 0.9 ? 'T' : 'notch';
+    case DT: return r < 0.55 ? 'rect' : r < 0.63 ? 'L' : r < 0.66 ? 'U' : r < 0.82 ? 'notch' : 'chamfer';
+    case MID: return r < 0.6 ? 'rect' : r < 0.72 ? 'L' : r < 0.75 ? 'U' : r < 0.78 ? 'T' : 'notch';
     case OLD: return r < 0.55 ? 'rect' : r < 0.8 ? 'slant' : 'L';
     case SUB: return r < 0.62 ? 'rect' : r < 0.92 ? 'L' : 'T';
     case IND: return r < 0.66 ? 'rect' : r < 0.86 ? 'L' : 'stepped';
@@ -1736,7 +1741,7 @@ function pocketParks(ctx) {
     const zone = zoneAt(ctx, x0, y0);
     if (area < 110) { for (let k = 0; k < t; k++) a[q[k]] = KEEP; continue; }
     let make = false;
-    if ((zone === DT || zone === MID) && area < 2600 && rng.chance(0.3)) make = true;
+    if ((zone === DT || zone === MID) && area < 2600 && rng.chance(0.15)) make = true;
     else if (zone === OLD && area < 1800 && rng.chance(0.12)) make = true;
     else if (water && zone !== IND && area < 16000 && rng.chance(0.3)) make = true;
     else if (zone === SUB && area > 2500 && area < 12000 && !edge && rng.chance(0.05)) make = true;
@@ -1752,19 +1757,20 @@ function pocketParks(ctx) {
 
 // ================================================================= frontage buildings
 
+// Suburban runs: detached lots use f; terraces and semis (row) put 2-4 narrow houses wall to wall.
 const LOT = {
-  [DT]: { f: [22, 46], d: [20, 42], run: [1, 3], gap: [1.5, 5], sb: [0.5, 2] },
-  [MID]: { f: [10, 22], d: [11, 20], run: [2, 5], gap: [2.5, 7], sb: [1, 3] },
-  [OLD]: { f: [6, 12], d: [9, 16], run: [3, 7], gap: [0.5, 3], sb: [0.2, 1] },
-  [SUB]: { f: [14, 21], d: [8, 12], run: [1, 1], gap: [0, 0], sb: [4.5, 8.5] },
-  [IND]: { f: [30, 75], d: [22, 55], run: [1, 1], gap: [8, 16], sb: [5, 12] },
+  [DT]: { f: [24, 48], d: [30, 50], run: [2, 5], gap: [0.4, 2], sb: [0.3, 1.2] },
+  [MID]: { f: [11, 24], d: [18, 30], run: [3, 7], gap: [0.8, 3], sb: [0.5, 1.8] },
+  [OLD]: { f: [6, 12], d: [14, 24], run: [4, 8], gap: [0.3, 1.8], sb: [0.2, 0.8] },
+  [SUB]: { f: [13, 19], d: [10, 14], run: [1, 1], gap: [0, 0], sb: [3, 6.5], row: [6.5, 9.5] },
+  [IND]: { f: [30, 75], d: [26, 58], run: [1, 2], gap: [5, 12], sb: [3, 8] },
 };
-const STRIP = { f: [12, 22], d: [12, 20], run: [1, 3], gap: [3, 8], sb: [3, 6] };
+const STRIP = { f: [12, 22], d: [16, 24], run: [2, 4], gap: [1.5, 5], sb: [2, 4.5] };
 
 function placeFrontage(ctx) {
   const rng = ctx.rng.fork('frontage');
   const { occ, cx, cy, Rd, o } = ctx;
-  const dens = o.density;
+  const dens = ctx.dens;
   const roads = ctx.roads.filter(r => FRONT_CLS[r.cls] !== undefined).sort((a, b) => FRONT_CLS[a.cls] - FRONT_CLS[b.cls]);
   for (const r of roads) {
     const P = r.p, n = P.length / 2;
@@ -1780,9 +1786,9 @@ function placeFrontage(ctx) {
       return [ax + (bx - ax) * t, ay + (by - ay) * t, (bx - ax) / sl, (by - ay) / sl];
     };
     const major = r.cls !== 'loc';
-    const sideW = zoneAt(ctx, P[0], P[1]) === DT ? 3 : 2;
+    const sideW = zoneAt(ctx, P[0], P[1]) === DT ? 2.5 : 1.8;
     for (const side of [1, -1]) {
-      let s = r.w / 2 + 3;
+      let s = r.w / 2 + 1.5;
       while (s < L - 4) {
         const [px, py] = at(s);
         const zone = zoneAt(ctx, px, py);
@@ -1790,9 +1796,10 @@ function placeFrontage(ctx) {
         const strip = zone === SUB && major && rng.chance(0.75);
         const lot = strip ? STRIP : LOT[zone];
         if (zone === SUB && !strip && rng.chance(0.1 * (1 - dens) + 0.03)) { s += rng.range(lot.f[0], lot.f[1]); continue; }
-        let k = rng.int(lot.run[0], lot.run[1]);
+        const house = zone === SUB && !strip, row = house && rng.chance(0.35 + 0.55 * dens);
+        let k = row ? rng.int(2, 4) : rng.int(lot.run[0], lot.run[1]);
         const fs = [];
-        for (let i = 0; i < k; i++) fs.push(rng.range(lot.f[0], lot.f[1]) * (zone === SUB && !strip ? 1.2 - 0.3 * dens : 1));
+        for (let i = 0; i < k; i++) fs.push(row ? rng.range(lot.row[0], lot.row[1]) : rng.range(lot.f[0], lot.f[1]) * (house ? 1.2 - 0.3 * dens : 1));
         let total = fs.reduce((x, y) => x + y, 0);
         while (k > 1 && s + total > L - 3) { total -= fs.pop(); k--; }
         if (s + total > L - 3) { if (L - 3 - s < lot.f[0] * 0.7) break; fs[0] = L - 3 - s; total = fs[0]; }
@@ -1801,27 +1808,26 @@ function placeFrontage(ctx) {
           if (t0x * t1x + t0y * t1y > 0.985) break;
           total -= fs.pop(); k--;
         }
-        const gap = rng.range(lot.gap[0], lot.gap[1]);
+        const gap = row ? rng.range(2.5, 5) : rng.range(lot.gap[0], lot.gap[1]);
         const dc = dist(px, py, cx, cy);
         let d = rng.range(lot.d[0], lot.d[1]);
         if (zone === DT) d *= 1 + 0.35 * (1 - clamp(dc / Rd, 0, 1));
         const sb = r.w / 2 + sideW + rng.range(lot.sb[0], lot.sb[1]) + 0.7;
         let placed = false;
-        for (let attempt = 0; attempt < 4 && !placed; attempt++) {
+        for (let attempt = 0; attempt < 7 && !placed; attempt++) {
           const [ox, oy, tx, ty] = at(s + total / 2);
           const vx = -ty * side, vy = tx * side;
-          const house = zone === SUB && !strip;
-          const bw = house ? total - rng.range(4, 7.5) : total;
+          const bw = house && !row ? total - rng.range(2.5, 5) : total;
           if (bw < 5) break;
-          const marg = house ? 1.5 : gap / 2;
+          const marg = house ? (row ? 1.2 : 1.5) : gap / 2;
           if (frameTest(occ, ox, oy, tx, ty, vx, vy, -bw / 2 - marg, bw / 2 + marg, sb, sb + d + (house ? 3 : 1.2))) {
             frameMark(occ, ox, oy, tx, ty, vx, vy, -bw / 2 + 0.3, bw / 2 - 0.3, sb + 0.3, sb + d - 0.3, BLDG);
             let u = -bw / 2;
             for (let i = 0; i < k; i++) {
-              const fw = house ? bw : fs[i];
+              const fw = house && !row ? bw : fs[i];
               const area = fw * d;
               const tower = zone === DT && area >= 520 && rng.chance(0.78);
-              const di = tower || zone === OLD || house ? d : d * rng.range(0.7, 1);
+              const di = tower || zone === OLD || house ? d : d * rng.range(0.86, 1);
               const loc = shapeLocal(pickShape(rng, zone, tower), fw, di, rng);
               for (let q = 0; q < loc.length; q += 2) { loc[q] += u + fw / 2; loc[q + 1] += sb; }
               const wp = toWorld(loc, ox, oy, tx, ty, vx, vy);
@@ -1830,9 +1836,9 @@ function placeFrontage(ctx) {
               u += fw;
             }
             placed = true;
-          } else if (attempt === 0 && d > lot.d[0] * 0.8) d *= 0.65;
+          } else if (d > lot.d[0] * 0.7) d *= 0.8;
           else if (k > 1) { total -= fs.pop(); k--; }
-          else d *= 0.7;
+          else d *= 0.8;
           if (d < lot.d[0] * 0.45) break;
         }
         s += placed ? total + gap : 3;
@@ -1842,7 +1848,7 @@ function placeFrontage(ctx) {
 }
 
 function lotUse(ctx, rng, zone, strip, tower, dc, area, major) {
-  const dens = ctx.o.density;
+  const dens = ctx.dens;
   switch (zone) {
     case DT: {
       if (tower) {
@@ -1867,18 +1873,18 @@ function lotUse(ctx, rng, zone, strip, tower, dc, area, major) {
 function fillYards(ctx) {
   const rng = ctx.rng.fork('yards');
   const { zg, occ } = ctx;
-  for (let j = 1; j < zg.gh - 1; j += 3) for (let i = 1; i < zg.gw - 1; i += 3) {
+  for (let j = 1; j < zg.gh - 1; j += 2) for (let i = 1; i < zg.gw - 1; i += 2) {
     const zone = zg.zone[j * zg.gw + i];
-    if (zone !== DT && zone !== OLD && !(zone === MID && rng.chance(0.5))) continue;
-    const x = (i + rng.range(0, 3)) * ZG_CELL, y = (j + rng.range(0, 3)) * ZG_CELL;
+    if (zone !== DT && zone !== OLD && zone !== MID) continue;
+    const x = (i + rng.range(0, 2)) * ZG_CELL, y = (j + rng.range(0, 2)) * ZG_CELL;
     if (occAt(occ, x, y) !== FREE) continue;
     const dd = districtAt(ctx, x, y), th = zone === DT ? ctx.theta0 : (dd ? dd.theta : ctx.theta0);
     const ux = Math.cos(th), uy = Math.sin(th), vx = -uy, vy = ux;
     for (const sc of [1, 0.75, 0.55]) {
-      const w = (zone === DT ? rng.range(22, 44) : zone === OLD ? rng.range(8, 16) : rng.range(12, 24)) * sc;
-      const dd2 = (zone === DT ? rng.range(18, 36) : zone === OLD ? rng.range(8, 13) : rng.range(10, 18)) * sc;
+      const w = (zone === DT ? rng.range(22, 46) : zone === OLD ? rng.range(8, 16) : rng.range(12, 26)) * sc;
+      const dd2 = (zone === DT ? rng.range(18, 38) : zone === OLD ? rng.range(8, 13) : rng.range(10, 20)) * sc;
       if (w < 9 || dd2 < 8) break;
-      const mg = zone === OLD ? 1.6 : 3;
+      const mg = zone === OLD ? 1.4 : 2.2;
       if (!frameTest(occ, x, y, ux, uy, vx, vy, -w / 2 - mg, w / 2 + mg, -dd2 / 2 - mg, dd2 / 2 + mg)) continue;
       const tower = zone === DT && w * dd2 >= 520 && rng.chance(0.6);
       const loc = shapeLocal(pickShape(rng, zone, tower), w, dd2, rng).map((v, q) => (q % 2 ? v - dd2 / 2 : v));
@@ -1918,6 +1924,45 @@ function fillYards(ctx) {
         break;
       }
     }
+  }
+}
+
+// Last pass over the urban zones: leftover ground inside blocks is packed with back buildings, each grown from a
+// seed point in 2 m steps until it meets a neighbour's margin, so cores read as built up rather than as lawns.
+// Suburbs only get blocks of flats, and only on open ground well clear of the houses (big margin), not in back gardens.
+const INFILL = { [DT]: { max: [54, 44], mg: 0.8, h: 26, p: 1 }, [MID]: { max: [32, 26], mg: 0.8, h: 15, p: 1 }, [OLD]: { max: [18, 15], mg: 0.7, h: 15, p: 1 },
+  [SUB]: { max: [36, 15], mg: 4, h: 15, p: 0.8, flats: true } };
+function growRect(occ, x, y, ux, uy, vx, vy, mg, maxW, maxD) {
+  let a0 = -3, a1 = 3, b0 = -3, b1 = 3;
+  if (!frameTest(occ, x, y, ux, uy, vx, vy, a0 - mg, a1 + mg, b0 - mg, b1 + mg)) return null;
+  for (let grew = true; grew;) {
+    grew = false;
+    if (a1 - a0 < maxW && frameTest(occ, x, y, ux, uy, vx, vy, a1 + mg, a1 + mg + 2, b0 - mg, b1 + mg)) { a1 += 2; grew = true; }
+    if (a1 - a0 < maxW && frameTest(occ, x, y, ux, uy, vx, vy, a0 - mg - 2, a0 - mg, b0 - mg, b1 + mg)) { a0 -= 2; grew = true; }
+    if (b1 - b0 < maxD && frameTest(occ, x, y, ux, uy, vx, vy, a0 - mg, a1 + mg, b1 + mg, b1 + mg + 2)) { b1 += 2; grew = true; }
+    if (b1 - b0 < maxD && frameTest(occ, x, y, ux, uy, vx, vy, a0 - mg, a1 + mg, b0 - mg - 2, b0 - mg)) { b0 -= 2; grew = true; }
+  }
+  return [a0, a1, b0, b1];
+}
+function infillBlocks(ctx) {
+  const rng = ctx.rng.fork('infill');
+  const { zg, occ } = ctx;
+  for (const off of [0.5, 0]) for (let j = 1; j < zg.gh - 1; j++) for (let i = 1; i < zg.gw - 1; i++) {
+    const zone = zg.zone[j * zg.gw + i], spec = INFILL[zone];
+    if (!spec) continue;
+    const x = (i + off) * ZG_CELL, y = (j + off) * ZG_CELL;
+    if (occAt(occ, x, y) !== FREE || !rng.chance(spec.p)) continue;
+    const dd = districtAt(ctx, x, y), th = zone === DT ? ctx.theta0 : (dd ? dd.theta : ctx.theta0);
+    const ux = Math.cos(th), uy = Math.sin(th), vx = -uy, vy = ux;
+    const r = growRect(occ, x, y, ux, uy, vx, vy, spec.mg, spec.max[0] * rng.range(0.7, 1), spec.max[1] * rng.range(0.7, 1));
+    if (!r) continue;
+    const w = r[1] - r[0], d = r[3] - r[2];
+    if (Math.max(w, d) < (spec.flats ? 18 : 7) || Math.min(w, d) < (spec.flats ? 9 : 7) || w > 5 * d || d > 5 * w) continue;
+    const ox = x + ux * (r[0] + r[1]) / 2 + vx * (r[2] + r[3]) / 2, oy = y + uy * (r[0] + r[1]) / 2 + vy * (r[2] + r[3]) / 2;
+    const loc = shapeLocal(rng.chance(0.75) ? 'rect' : pickShape(rng, zone, false), w, d, rng).map((v, q) => (q % 2 ? v - d / 2 : v));
+    frameMark(occ, ox, oy, ux, uy, vx, vy, -w / 2, w / 2, -d / 2, d / 2, BLDG);
+    const [h, kind, use] = spec.flats ? [rng.range(9, spec.h), 'res', 'Flats'] : lotUse(ctx, rng, zone, false, false, dist(ox, oy, ctx.cx, ctx.cy), w * d, false);
+    addBuilding(ctx, toWorld(loc, ox, oy, ux, uy, vx, vy), Math.min(h, spec.h), kind, use, zone, {});
   }
 }
 

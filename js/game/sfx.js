@@ -1,7 +1,7 @@
 // Tiny synthesised sound effects (WebAudio, no files): dry gunfire ticks, thumps, blasts, sirens, typewriter clacks.
 
 const MIN_GAP = { shot: 55, thump: 70, explosion: 70, clack: 28, wall: 120, collapse: 160, mutant: 400, heli: 900, siren: 1500,
-  breach: 900, zap: 90, whoosh: 150, hiss: 200, snipe: 90, jet: 700, error: 120, place: 40, refund: 60, upgrade: 80, tick: 60, ready: 300, win: 2000, lose: 2000, nuke: 3000, alarm: 600 };
+  breach: 900, zap: 90, whoosh: 150, hiss: 200, snipe: 90, jet: 700, error: 120, place: 40, refund: 60, upgrade: 80, tick: 60, ready: 300, win: 2000, lose: 2000, nuke: 3000, alarm: 600, expand: 1500, stamp: 250, bell: 400 };
 
 // Maps any sound name the simulation or combat code emits onto one of the synthesised voices.
 function voiceFor(name) {
@@ -288,6 +288,42 @@ export class Sfx {
   _error(out, t) {
     const g = this._env(out, t, 0.002, 0.2, 0.12);
     this._osc('square', 140, t, 0.14).connect(this._filter('lowpass', 900)).connect(g);
+  }
+
+  // Stage growth: a sheet sliding across the desk, then a pen scratching along the new boundary.
+  _expand(out, t) {
+    const g = this._env(out, t, 0.25, 0.24, 1.1);
+    const f = this._filter('bandpass', 500, 0.7);
+    f.frequency.exponentialRampToValueAtTime(1800, t + 0.45);
+    f.frequency.exponentialRampToValueAtTime(700, t + 1.3);
+    const n1 = this._noiseSrc(t, 1.4, 0.6);
+    n1.loop = true;
+    n1.connect(f).connect(g);
+    const s0 = t + 0.2, g2 = this._env(out, s0, 0.08, 0.09, 1.3);
+    const am = this.ac.createGain();
+    am.gain.value = 0.5;
+    const depth = this.ac.createGain();
+    depth.gain.value = 0.45;
+    this._osc('triangle', 13, s0, 1.4).connect(depth).connect(am.gain);
+    const n2 = this._noiseSrc(s0, 1.4, 1.2);
+    n2.loop = true;
+    n2.connect(this._filter('highpass', 3200, 0.7)).connect(am).connect(g2);
+  }
+
+  _stamp(out, t) {
+    const g = this._env(out, t, 0.002, 0.7, 0.16);
+    const o = this._osc('sine', 150, t, 0.2);
+    o.frequency.exponentialRampToValueAtTime(55, t + 0.12);
+    o.connect(g);
+    const g2 = this._env(out, t, 0.001, 0.4, 0.05);
+    this._noiseSrc(t, 0.07, 0.8).connect(this._filter('bandpass', 1100, 0.9)).connect(g2);
+  }
+
+  _bell(out, t) {
+    const g = this._env(out, t, 0.002, 0.22, 0.9);
+    this._osc('sine', 2637, t, 1).connect(g);
+    const g2 = this._env(out, t, 0.002, 0.08, 0.5);
+    this._osc('sine', 3951, t, 0.6).connect(g2);
   }
 
   _ready(out, t) {

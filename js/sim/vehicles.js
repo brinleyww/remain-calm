@@ -4,7 +4,7 @@ import { T } from '../map/format.js';
 import { clamp } from '../util/geom.js';
 import { ZOMBIE, ZSUB, M_ZOMBIE, M_CIV } from './agents.js';
 import { P_CIV, P_SLOW, nearestPassable, updatePassCells } from './nav.js';
-import { abilityKey, nearestZombie, zombiesNear, pickCluster, queueShell, sound, log } from './combat.js';
+import { abilityKey, nearestZombie, zombiesNear, pickDirect, pickArty, addClaim, queueShell, sound, log } from './combat.js';
 
 export const GROUND_VEHICLES = new Set(['apc', 'bus', 'bulldozer', 'tank']);
 export const VEHICLE_NAMES = {
@@ -202,7 +202,25 @@ function gunHit(world, v, t, dmg, acc, key) {
   const A = world.A;
   world.projectiles.push({ kind: 'tracer', x0: v.x, y0: v.y, x1: A.x[t], y1: A.y[t], t0: world.t, dur: 0.06, src: key });
   if (world.rng.next() < acc && world.damageAgent(t, dmg, key)) { v.kills++; return true; }
+  addClaim(world, t, dmg * acc);
   return false;
+}
+
+// A vehicle gun keeps its zombie while it lives in range, else takes one the other guns have not covered.
+function gunTarget(world, v, slot, r, shot) {
+  const A = world.A;
+  let t = v[slot];
+  if (t >= 0 && A.type[t] === ZOMBIE) { const dx = A.x[t] - v.x, dy = A.y[t] - v.y; if (dx * dx + dy * dy <= r * r) return t; }
+  t = zombiesNear(world, v.x, v.y, r) ? pickDirect(world, v.x, v.y, r, shot) : -1;
+  v[slot] = t;
+  return t;
+}
+
+const SHELL_W = { r: 10, dmg: 0, n: 1, spread: 0, speed: 260, kind: 0, minC: 1, ox: 0, oy: 0 };
+function shellAim(world, v, x, y, minR, maxR, r, dmg, speed) {
+  const W = SHELL_W;
+  W.r = r; W.dmg = dmg; W.speed = speed; W.ox = v.x; W.oy = v.y;
+  return pickArty(world, x, y, minR, maxR, W);
 }
 
 function cannon(world, v, x, y, dmg, splash, speed, key) {
@@ -262,19 +280,22 @@ function updateArmour(world, v, dt) {
     if (d > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt);
   } else if (Math.hypot(v.hx - v.x, v.hy - v.y) > 6) drive(world, v, v.hx, v.hy, a.speed, dt);
   if (tank) {
-    if (t >= 0 && v.cd <= 0 && d <= a.range && d > (a.splash || 10) + 4) {
-      cannon(world, v, A.x[t], A.y[t], a.dmg, a.splash || 10, 260, key);
-      v.cd = a.rof;
-      sound(world, 'thump', v.x, v.y, 0.7, 4);
+    if (t >= 0 && v.cd <= 0) {
+      const aim = shellAim(world, v, v.x, v.y, (a.splash || 10) + 4, a.range, a.splash || 10, a.dmg, 260);
+      if (aim) {
+        cannon(world, v, aim[0], aim[1], a.dmg, a.splash || 10, 260, key);
+        v.cd = a.rof;
+        sound(world, 'thump', v.x, v.y, 0.7, 4);
+      } else v.cd = 0.3;
     }
     if (v.mgCd <= 0) {
-      const m = nearestZombie(world, v.x, v.y, a.mgRange);
+      const m = gunTarget(world, v, 'mgT', a.mgRange, a.mgDmg * 0.8);
       if (m >= 0) { gunHit(world, v, m, a.mgDmg, 0.8, key); v.mgCd += a.mgRof; world.combat.shotN++; }
       if (v.mgCd < 0) v.mgCd = 0;
     }
     if ((world.tick & 1) === 0) crush(world, v, VEH_R + 1, (a.crushDps || 0) * dt * 2, key);
   } else if (v.mgCd <= 0) {
-    const m = t >= 0 && d <= a.range ? t : nearestZombie(world, v.x, v.y, a.range);
+    const m = gunTarget(world, v, 'mgT', a.range, a.dmg * 0.8);
     if (m >= 0) { gunHit(world, v, m, a.dmg, 0.8, key); v.mgCd += a.rof; world.combat.shotN++; }
     if (v.mgCd < 0) v.mgCd = 0;
   }
@@ -349,8 +370,12 @@ function updateHeli(world, v, dt) {
   v.cd -= dt;
   if (world.t >= v.scanT) {
     v.scanT = world.t + 0.3;
-    let t = nearestZombie(world, v.x, v.y, a.huntRadius);
-    if (t >= 0 && Math.hypot(A.x[t] - v.sx, A.y[t] - v.sy) > a.huntRadius) t = nearestZombie(world, v.sx, v.sy, a.huntRadius);
+    let t = v.tgt;
+    if (!(t >= 0 && A.type[t] === ZOMBIE && Math.hypot(A.x[t] - v.x, A.y[t] - v.y) <= a.range)) {
+      t = zombiesNear(world, v.x, v.y, a.range) ? pickDirect(world, v.x, v.y, a.range, a.dmg * 0.85) : -1;
+      if (t < 0 || Math.hypot(A.x[t] - v.sx, A.y[t] - v.sy) > a.huntRadius) t = nearestZombie(world, v.x, v.y, a.huntRadius);
+      if (t >= 0 && Math.hypot(A.x[t] - v.sx, A.y[t] - v.sy) > a.huntRadius) t = nearestZombie(world, v.sx, v.sy, a.huntRadius);
+    }
     v.tgt = t;
   }
   let t = v.tgt;
@@ -387,7 +412,7 @@ function updateGunship(world, v, dt) {
   v.x = v.cx + Math.cos(v.ang) * R; v.y = v.cy + Math.sin(v.ang) * R; v.heading = v.ang + Math.PI / 2;
   v.bigCd -= dt; v.smallCd -= dt;
   if (v.bigCd <= 0) {
-    const aim = pickCluster(world, v.cx, v.cy, 0, R);
+    const aim = shellAim(world, v, v.cx, v.cy, 0, R, a.bigSplash, a.bigDmg, 500);
     if (aim) {
       const dur = Math.hypot(aim[0] - v.x, aim[1] - v.y) / 500;
       world.projectiles.push({ kind: 'shell', x0: v.x, y0: v.y, x1: aim[0], y1: aim[1], t0: world.t, dur, src: key });
@@ -399,11 +424,12 @@ function updateGunship(world, v, dt) {
   }
   if (v.smallCd <= 0) {
     const ang = world.rng.next() * Math.PI * 2, rr = world.rng.next() * R * 0.6;
-    const t = nearestZombie(world, v.cx + Math.cos(ang) * rr, v.cy + Math.sin(ang) * rr, R);
+    const t = pickDirect(world, v.cx + Math.cos(ang) * rr, v.cy + Math.sin(ang) * rr, R, a.smallDmg);
     if (t >= 0 && Math.hypot(A.x[t] - v.cx, A.y[t] - v.cy) <= R * 1.1) {
       const dur = Math.hypot(A.x[t] - v.x, A.y[t] - v.y) / 700;
       world.projectiles.push({ kind: 'shell', x0: v.x, y0: v.y, x1: A.x[t], y1: A.y[t], t0: world.t, dur, src: key });
       queueShell(world, A.x[t], A.y[t], dur, { r: a.smallSplash, dmg: a.smallDmg, src: key, friendly: !!ff.auto, wallDmg: a.smallDmg * ff.autoStructureMul, fx: 'boom', u: v });
+      addClaim(world, t, a.smallDmg);
       v.smallCd = a.smallRof;
     } else v.smallCd = 0.3;
   }

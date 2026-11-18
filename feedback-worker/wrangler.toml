@@ -1,0 +1,17 @@
+name = "remain-calm-feedback"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# deploy.ps1 creates the namespace and writes its id here on the first run
+[[kv_namespaces]]
+binding = "FEEDBACK"
+id = "KV_ID_PLACEHOLDER"
+
+# the 10-minute marks and the daily cap (one instance, so parallel sends are checked one at a time)
+[[durable_objects.bindings]]
+name = "GATE"
+class_name = "Gate"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Gate"]

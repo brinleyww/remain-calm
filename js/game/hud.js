@@ -1,6 +1,6 @@
 // In-game HUD: header strip, tool rack, unit and ability slots, budget meters, minimap, log, tally, cursor label.
 import { h, setText, setHTML, toggle, show, esc, fmtInt, fmtMoney, fmtPct, fmtTime } from './el.js';
-import { drawUnitGlyph } from '../render/worldrender.js';
+import { drawUnitGlyph, drawAgentKey, KEY_KINDS } from '../render/worldrender.js';
 import { drawMinimap, minimapTransform } from '../render/maprender.js';
 
 const TOOLS = [
@@ -78,12 +78,13 @@ export class Hud {
     E.viewH = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleView('height') }, h('span.rc-tool-name', null, 'Heights'), key('viewHeights'));
     E.viewC = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleView('specials') }, h('span.rc-tool-name', null, 'Specials'), key('viewSpecials'));
     E.viewR = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleRings() }, h('span.rc-tool-name', null, 'Ranges'), key('viewRanges'));
+    E.viewK = h('button.rc-tool.rc-toggle', { type: 'button', title: 'Map key: people, zombies and mutants', onclick: () => this.toggleKey() }, h('span.rc-tool-name', null, 'Key'));
     E.undo = h('button.rc-tool', { type: 'button', onclick: () => s.undo() }, h('span.rc-tool-name', null, 'Undo'), key('undo'));
     E.rack = h('aside.rc-rack.card.flat', null,
       h('div.rc-sec', null, 'Works'), ...TOOLS.map(([n, l]) => toolBtn(n, l)),
       h('div.rc-sec', null, 'Units'), E.units,
       h('div.rc-sec', null, 'Orders'), toolBtn('upgrade', 'Upgrade'), toolBtn('refund', 'Refund'), E.paint, E.loadout, E.undo,
-      h('div.rc-sec', null, 'View'), E.viewH, E.viewC, E.viewR);
+      h('div.rc-sec', null, 'View'), E.viewH, E.viewC, E.viewR, E.viewK);
 
     // ---------------- right column
     E.money = h('b.meter-val'); E.moneyCap = h('small');
@@ -97,7 +98,8 @@ export class Hud {
     E.miniBox = h('section.rc-minibox.card.flat', null, E.mini);
     E.info = h('section.rc-info');
     E.tally = h('section.rc-tally.card.flat', { hidden: true });
-    E.side = h('aside.rc-side', null, E.budget, E.miniBox, E.info, E.tally);
+    E.key = this.buildKey();
+    E.side = h('aside.rc-side', null, E.budget, E.miniBox, E.key, E.info, E.tally);
 
     // ---------------- bottom
     E.abilities = h('div.rc-abilities');
@@ -175,6 +177,38 @@ export class Hud {
     }
   }
 
+  // ---------------------------------------------------------------- map key
+  buildKey() {
+    const pal = this.s.pal, dpr = window.devicePixelRatio || 1;
+    const swatch = (kind, r, tier) => {
+      const cv = h('canvas', { width: Math.round(20 * dpr), height: Math.round(20 * dpr) });
+      const g = cv.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawAgentKey(g, kind, 10, 10, pal, r, tier);
+      return cv;
+    };
+    const rows = KEY_KINDS.map(([kind, label]) => {
+      const mut = kind === 'explosive' || kind === 'shielded' || kind === 'swimmer' || kind === 'giant';
+      const r = kind === 'giant' ? 7.5 : mut ? 5 : kind === 'zombie' ? 3.6 : 3.3;
+      return h('div.rc-key-row', null, swatch(kind, r, 2), mut ? swatch(kind, r, 0) : null, h('span', null, label));
+    });
+    const el = h('section.rc-key.card.flat', { hidden: true },
+      h('div.rc-sec', null, 'Map key'), h('div.rc-key-grid', null, ...rows),
+      h('p.rc-key-note', null, 'Mutants: full health beside wounded. Deeper colour and a heavier ring mean more health.'));
+    let on = false;
+    try { on = localStorage.getItem('rc.mapKey') === '1'; } catch (e) { /* storage blocked */ }
+    this.keyOn = on;
+    el.hidden = !on;
+    return el;
+  }
+
+  toggleKey() {
+    this.keyOn = !this.keyOn;
+    this.el.key.hidden = !this.keyOn;
+    toggle(this.el.viewK, 'is-on', this.keyOn);
+    try { localStorage.setItem('rc.mapKey', this.keyOn ? '1' : '0'); } catch (e) { /* storage blocked */ }
+  }
+
   refreshKeys() {
     for (const k of this.root.querySelectorAll('.keycap[data-key]')) k.textContent = this.s.prefs.keyLabel(k.getAttribute('data-key'));
     this.rebuildSlots();
@@ -219,6 +253,7 @@ export class Hud {
     toggle(E.viewH, 'is-on', s.view === 'height');
     toggle(E.viewC, 'is-on', s.view === 'specials');
     toggle(E.viewR, 'is-on', s.rings);
+    toggle(E.viewK, 'is-on', !!this.keyOn);
     E.undo.disabled = !planning || !s.undoStack.length || !!s.net;
     E.loadout.disabled = !planning;
     const over = w.phase === 'won' || w.phase === 'lost';

@@ -33,6 +33,7 @@ const memo = {
 export function mount(root, app, params) {
   memo.sandbox = params.sandbox === true || params.sandbox === '1' || params.sandbox === 1;
   if (params.lib) { memo.tab = 'library'; memo.libId = params.lib; }
+  if (params.tab === 'osm' || params.tab === 'generated') memo.tab = params.tab;
   const sandboxMode = () => memo.sandbox;
 
   const frame = screenFrame({

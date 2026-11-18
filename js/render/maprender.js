@@ -1162,7 +1162,7 @@ function pathDevice(ctx, p, z, offX, offY) {
 
 // Draws the paper map for one frame. ctx must be in CSS-pixel space (identity * devicePixelRatio).
 // opts: { palette, view: 'normal'|'height'|'specials', stageMask (level index | flat polygon | Uint8Array cell mask | level/region object),
-//         stage (alias of stageMask), dimOutside = true, allStages = false, hover (building idx | {b} | {bridge: gridBridgeId} | {road}),
+//         stage (alias of stageMask), dimOutside = true, stageLine = true, allStages = false, hover (building idx | {b} | {bridge: gridBridgeId} | {road}),
 //         frame = true (sheet margin + graduated border), world (optional: use world.buildings/bridges alive flags), budgetMs, cache }
 // Returns { pending, rendered, ms } — pending > 0 means more tiles will sharpen on the next frames.
 export function drawStatic(ctx, map, grid, camera, opts = {}) {
@@ -1303,19 +1303,21 @@ export function drawStatic(ctx, map, grid, camera, opts = {}) {
       usePattern(ctx, cache.style.pats.hatch, mx0, my0);
       ctx.fill('evenodd');
     }
-    ctx.beginPath();
-    pathDevice(ctx, sm, z, offX, offY);
-    ctx.save();
-    ctx.clip();
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = 12 * dpr;
-    ctx.strokeStyle = pal.stageBand;
-    ctx.stroke();
-    ctx.restore();
-    ctx.lineWidth = 1.7 * dpr;
-    ctx.strokeStyle = pal.stageLine;
-    ctx.setLineDash([13 * dpr, 3.5 * dpr, 2.5 * dpr, 3.5 * dpr]);
-    ctx.stroke();
+    if (opts.stageLine !== false) {
+      ctx.beginPath();
+      pathDevice(ctx, sm, z, offX, offY);
+      ctx.save();
+      ctx.clip();
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 12 * dpr;
+      ctx.strokeStyle = pal.stageBand;
+      ctx.stroke();
+      ctx.restore();
+      ctx.lineWidth = 1.7 * dpr;
+      ctx.strokeStyle = pal.stageLine;
+      ctx.setLineDash([13 * dpr, 3.5 * dpr, 2.5 * dpr, 3.5 * dpr]);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 

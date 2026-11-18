@@ -128,6 +128,14 @@
 .rc-sp-row { margin-top: .1rem; }
 .rc-minibox { padding: 4px; background: var(--paper-2); }
 .rc-minimap { display: block; width: 100%; height: 168px; cursor: crosshair; }
+.rc-key { padding: .45rem .6rem .5rem; background: var(--card); flex: none; }
+.rc-key[hidden] { display: none; }
+.rc-key .rc-sec { margin-top: 0; }
+.rc-key-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .05rem .5rem; }
+.rc-key-row { display: flex; align-items: center; gap: .2rem; min-width: 0; font-size: var(--fs-1); line-height: 1.25; white-space: nowrap; }
+.rc-key-row canvas { width: 20px; height: 20px; flex: none; }
+.rc-key-row span { overflow: hidden; text-overflow: ellipsis; }
+.rc-key-note { margin: .3rem 0 0; font-size: var(--fs-0); line-height: 1.3; color: var(--ink-2); }
 .rc-info { min-height: 0; flex: 0 1 auto; overflow-y: auto; scrollbar-width: thin; }
 .rc-info[hidden] { display: none; }
 .rc-card { padding: .55rem .7rem .7rem; background: var(--card); }
@@ -267,6 +275,28 @@
 .rc-pausedmark { position: absolute; z-index: 12; left: 50%; top: calc(var(--top-h) + 6.2rem); transform: translateX(-50%); pointer-events: none; }
 .rc-pausedmark[hidden] { display: none; }
 .rc-pausedmark .stamp { font-size: var(--fs-6); background: color-mix(in srgb, var(--card) 80%, transparent); }
+
+.rc-expand { position: absolute; z-index: 26; left: 50%; top: 42%; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: 1.3rem; pointer-events: none; }
+.rc-expand.is-out { opacity: 0; transition: opacity .35s linear; }
+.rc-expand .stamp { font-size: var(--fs-7); background: color-mix(in srgb, var(--card) 80%, transparent); visibility: hidden; }
+.rc-expand .stamp.is-on { visibility: visible; animation: rc-stamp-slam .2s cubic-bezier(.3, .9, .4, 1) both; }
+.rc-expand-line {
+  margin: 0; padding: .42rem .8rem .38rem; visibility: hidden; white-space: pre;
+  background: var(--card); border: 1px solid var(--ink); box-shadow: 3px 3px 0 var(--ink);
+  font: 600 var(--fs-2)/1.3 var(--font-mono); letter-spacing: .06em;
+}
+.rc-expand-line.is-on { visibility: visible; }
+.rc-expand-line .rest { color: transparent; }
+.rc-expand-line.is-typing .rest::before { content: '_'; position: absolute; color: var(--ink); }
+.rc-expand.is-still .stamp.is-on { animation: none; }
+@keyframes rc-stamp-slam {
+  0% { opacity: 0; transform: rotate(var(--rot)) scale(1.9); }
+  70% { opacity: 1; transform: rotate(var(--rot)) scale(.97); }
+  100% { opacity: 1; transform: rotate(var(--rot)) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rc-expand .stamp.is-on { animation: none; }
+}
 
 /* ---------------------------------------------------------------- cursor label + tooltip */
 .rc-qlabel {

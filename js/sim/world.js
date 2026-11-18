@@ -7,9 +7,9 @@ import { initNav, navSystem, computeFieldsNow, P_IN, P_CIV, P_ZOM, P_SWIM, P_SLO
 import {
   TYPE, TYPE_KEYS, CS, ZSUB, SUB_KEYS, M_CIV, M_ZOMBIE, M_TURNING, M_POLICE, M_MILITIA, M_SOLDIER, M_ARMED, M_HUMAN, M_ALL,
   initAgents, spawnAgent, removeAgent, infectAgent, cureAgent, evacuateAgent, damageAgent, queryAgents, nearestAgent,
-  zombieHp, rebuildHash, agentSystem, releaseCivs, setType, armedStats,
+  zombieHp, rebuildHash, agentSystem, releaseCivs, setType, armedStats, markWallAgents,
 } from './agents.js';
-import { initZones, registerZoneCommands, rebuildZones, rebuildFeatureGrids, inZone, buildingInZone, savePlacements, loadPlacements } from './zones.js';
+import { initZones, registerZoneCommands, rebuildZones, rebuildFeatureGrids, inZone, buildingInZone, savePlacements, loadPlacements, gateCheck } from './zones.js';
 import {
   initStructures, registerStructureCommands, damageBuilding, collapseBuilding, damageBridge, damageWallsArea, damageWallCell,
   damageArea, auraMul, hasSupply, functionsSystem, onBreach, refreshFunctions, funcAllowed,
@@ -58,6 +58,7 @@ export class World {
     this._id = 1;
     this._onBreach = (k) => onBreach(this, k);
     this._releaseCivs = (st) => releaseCivs(this, st);
+    this._onBlocks = () => { if (this.phase === 'battle') markWallAgents(this); };
 
     initNav(this);
     initZones(this);
@@ -71,7 +72,7 @@ export class World {
     registerEconomyCommands(this);
     this._registerCoreCommands();
     const sys = (name, update) => this.registerSystem({ name, update, order: SYSTEM_ORDER[name] });
-    sys('hash', (w) => rebuildHash(w));
+    sys('hash', (w) => rebuildHash(w, (w.tick & 1) === 0));
     sys('nav', (w) => navSystem(w));
     sys('agents', (w, dt) => agentSystem(w, dt));
     sys('functions', (w, dt) => functionsSystem(w, dt));
@@ -100,6 +101,10 @@ export class World {
   costMul(x, y, owner = 0, b = -1) { return costMul(this, x, y, owner, b); }
   inZone(x, y) { return inZone(this, x, y); }
   buildingInZone(b) { return buildingInZone(this, b); }
+  // Gate preview / warning: gateCheck(gateId) for a placed gate, gateCheck(x, y, owner) for a click. Returns
+  // { ok, opens, warn, x, y, x0, y0, x1, y1 }: where the gate would sit on the true wall and whether it joins open
+  // ground inside the zone to open ground outside (warn says why not: building, closed yard...).
+  gateCheck(idOrX, y, owner = 0) { return gateCheck(this, idOrX, y, owner); }
   auraMul(x, y, kind) { return auraMul(this, x, y, kind); }
   hasSupply(x, y) { return hasSupply(this, x, y); }
   funcAllowed(b, func) { const bd = this.buildings[b]; return !!bd && funcAllowed(this, bd, func); }

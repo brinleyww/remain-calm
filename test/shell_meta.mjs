@@ -11,7 +11,15 @@ globalThis.localStorage = {
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('FAIL', msg); } };
 
+// a player saved the old default population scale (0.35) before v2: it moves to the new default
+store.set('remain-calm.settings.v1', JSON.stringify({ popScale: 0.35, volume: 0.4 }));
 const S = await import('../js/meta/settings.js');
+ok(S.getSettings().popScale === 1 && S.getSettings().volume === 0.4, 'old default population scale migrates to 1');
+store.set('remain-calm.settings.v1', JSON.stringify({ popScale: 0.35, popV: 2 }));
+ok((await import('../js/meta/settings.js?chosen')).getSettings().popScale === 0.35, 'a 0.35 chosen after v2 stays');
+store.set('remain-calm.settings.v1', JSON.stringify({ popScale: 0.6 }));
+ok((await import('../js/meta/settings.js?custom')).getSettings().popScale === 0.6, 'a custom old scale stays');
+store.clear();
 const P = await import('../js/meta/progress.js');
 const A = await import('../js/meta/achievements.js');
 const M = await import('../js/ui/mutators.js');
@@ -35,7 +43,7 @@ ok(!S.bindKey('zone', 0, 'Escape').ok, 'Escape reserved');
 S.resetSettings('keys');
 ok(S.keysFor('zone')[0] === 'KeyB' && S.keysFor('wall')[0] === 'KeyN', 'reset keys');
 S.updateSettings({ popScale: 5, uiScale: 0.1, palette: 'bogus' });
-ok(S.getSettings().popScale === 1 && S.getSettings().uiScale === 0.8 && S.getSettings().palette === 'auto', 'settings are clamped');
+ok(S.getSettings().popScale === 2 && S.getSettings().uiScale === 0.8 && S.getSettings().palette === 'auto', 'settings are clamped');
 ok(S.popScaleMutator(0.5) === 'population.scale=0.5', 'pop scale line');
 ok(S.keyLabel('Ctrl+KeyZ') === 'Ctrl + Z' && S.keyLabel('Shift+Digit3') === 'Shift + 3', 'key labels');
 S.resetSettings();

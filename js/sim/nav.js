@@ -1,16 +1,21 @@
 // Passability, per-cell costs and flow fields (Dial's bucket-queue Dijkstra on typed arrays).
 // All fields live on the fine grid; the coarse grid (sim.coarse) is only used for fire and broadcast masks.
 // Field encoding: dist (Uint32, INF unreachable), dir (Uint8: 0..7 = step toward the target, 8 = target cell, 255 = unreachable).
+// Costs: 0 = blocked, low 7 bits = cost multiplier, BARRIER bit = wall or gate (no diagonal step may cut past it).
 import { T } from '../map/format.js';
 
 export const P_IN = 1, P_CIV = 2, P_ZOM = 4, P_SWIM = 8, P_SLOW = 16, P_WALL = 32, P_GATE = 64, P_WATER = 128;
 export const INF = 0xFFFFFFFF;
 export const DX = Int8Array.of(1, 1, 0, -1, -1, -1, 0, 1);
 export const DY = Int8Array.of(0, 1, 1, 1, 0, -1, -1, -1);
+const BARRIER = 128;
 
 const WALK = new Uint8Array(16);
 WALK[T.OPEN] = 1; WALK[T.ROAD] = 1; WALK[T.PARK] = 1; WALK[T.BRIDGE] = 1; WALK[T.RUBBLE] = 1; WALK[T.RAIL] = 1;
 export function isWalkTerrain(t) { return WALK[t] === 1; }
+// What a cell would let through if no wall stood on it.
+const UNDER = new Uint8Array(16);
+for (let t = 0; t < 16; t++) UNDER[t] = WALK[t] ? (P_CIV | P_ZOM | P_SWIM) : t === T.WATER ? P_SWIM : 0;
 
 export class DialJob {
   constructor(N, gw) {
@@ -37,6 +42,7 @@ export class DialJob {
   }
 
   // Expands up to `budget` cells. Returns true once finished. Border cells must have cost 0 (no bounds checks).
+  // A diagonal step needs both side cells open and neither a barrier, so fields never slip between wall cells.
   run(budget) {
     if (!this.active) return true;
     const dist = this.dist, dir = this.dir, cost = this.cost, buckets = this.buckets, mask = this.mask, gw = this.gw, maxD = this.maxD;
@@ -48,16 +54,16 @@ export class DialJob {
       if (dist[c] !== cur) continue;
       budget--;
       const ce = cost[c + 1], cw = cost[c - 1], cs = cost[c + gw], cn = cost[c - gw];
-      let nd;
-      if (ce) { nd = cur + 10 * ce; if (nd < dist[c + 1]) { dist[c + 1] = nd; dir[c + 1] = 4; buckets[nd & mask].push(c + 1); pending++; } }
-      if (cw) { nd = cur + 10 * cw; if (nd < dist[c - 1]) { dist[c - 1] = nd; dir[c - 1] = 0; buckets[nd & mask].push(c - 1); pending++; } }
-      if (cs) { nd = cur + 10 * cs; if (nd < dist[c + gw]) { dist[c + gw] = nd; dir[c + gw] = 6; buckets[nd & mask].push(c + gw); pending++; } }
-      if (cn) { nd = cur + 10 * cn; if (nd < dist[c - gw]) { dist[c - gw] = nd; dir[c - gw] = 2; buckets[nd & mask].push(c - gw); pending++; } }
-      let n, k;
-      if (ce && cs) { n = c + gw + 1; k = cost[n]; if (k) { nd = cur + 14 * k; if (nd < dist[n]) { dist[n] = nd; dir[n] = 5; buckets[nd & mask].push(n); pending++; } } }
-      if (cw && cs) { n = c + gw - 1; k = cost[n]; if (k) { nd = cur + 14 * k; if (nd < dist[n]) { dist[n] = nd; dir[n] = 7; buckets[nd & mask].push(n); pending++; } } }
-      if (cw && cn) { n = c - gw - 1; k = cost[n]; if (k) { nd = cur + 14 * k; if (nd < dist[n]) { dist[n] = nd; dir[n] = 1; buckets[nd & mask].push(n); pending++; } } }
-      if (ce && cn) { n = c - gw + 1; k = cost[n]; if (k) { nd = cur + 14 * k; if (nd < dist[n]) { dist[n] = nd; dir[n] = 3; buckets[nd & mask].push(n); pending++; } } }
+      let nd, n, k;
+      if (ce) { nd = cur + 10 * (ce & 127); if (nd < dist[c + 1]) { dist[c + 1] = nd; dir[c + 1] = 4; buckets[nd & mask].push(c + 1); pending++; } }
+      if (cw) { nd = cur + 10 * (cw & 127); if (nd < dist[c - 1]) { dist[c - 1] = nd; dir[c - 1] = 0; buckets[nd & mask].push(c - 1); pending++; } }
+      if (cs) { nd = cur + 10 * (cs & 127); if (nd < dist[c + gw]) { dist[c + gw] = nd; dir[c + gw] = 6; buckets[nd & mask].push(c + gw); pending++; } }
+      if (cn) { nd = cur + 10 * (cn & 127); if (nd < dist[c - gw]) { dist[c - gw] = nd; dir[c - gw] = 2; buckets[nd & mask].push(c - gw); pending++; } }
+      const okE = ce !== 0 && ce < BARRIER, okW = cw !== 0 && cw < BARRIER, okS = cs !== 0 && cs < BARRIER, okN = cn !== 0 && cn < BARRIER;
+      if (okE && okS) { n = c + gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 5; buckets[nd & mask].push(n); pending++; } } }
+      if (okW && okS) { n = c + gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 7; buckets[nd & mask].push(n); pending++; } } }
+      if (okW && okN) { n = c - gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 1; buckets[nd & mask].push(n); pending++; } } }
+      if (okE && okN) { n = c - gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 3; buckets[nd & mask].push(n); pending++; } } }
     }
     this.cur = cur; this.pending = pending;
     if (pending === 0) { this.active = false; return true; }
@@ -65,7 +71,7 @@ export class DialJob {
   }
 }
 
-function makeField(N, gw) { return { dist: new Uint32Array(N).fill(INF), dir: new Uint8Array(N).fill(255), job: new DialJob(N, gw), dirty: true, last: -1e9, ready: false }; }
+function makeField(N, gw) { return { dist: new Uint32Array(N).fill(INF), dir: new Uint8Array(N).fill(255), job: new DialJob(N, gw), dirty: true, last: -1e9, ready: false, urgent: true }; }
 
 function swap(f) {
   const d = f.dist, r = f.dir;
@@ -82,7 +88,8 @@ export function initNav(world) {
   const cN = cgw * cgh;
   world.nav = {
     R, cgw, cgh, cN, ccell: R * g.cell,
-    pass: new Uint8Array(N), civCost: new Uint8Array(N), zCost: new Uint8Array(N), sCost: new Uint8Array(N),
+    pass: new Uint8Array(N), under: new Uint8Array(N), civCost: new Uint8Array(N), zCost: new Uint8Array(N), sCost: new Uint8Array(N),
+    civDyn: new Uint8Array(N), dynList: [],
     civ: makeField(N, g.gw), scent: makeField(N, g.gw), swim: null,
     version: 0, regionCells: 1, swimmers: 0, k: costConsts(cfg),
     corrFields: [],
@@ -90,7 +97,7 @@ export function initNav(world) {
 }
 
 function costConsts(cfg) {
-  const sc = cfg.scent, n = (v) => Math.max(1, Math.min(255, v | 0));
+  const sc = cfg.scent, n = (v) => Math.max(1, Math.min(127, v | 0));
   return { wall: n(sc.wallCost), gate: n(sc.gateCost), rubble: n(sc.rubbleCost), park: n(sc.parkCost), water: n(sc.waterCostSwimmer) };
 }
 
@@ -122,9 +129,10 @@ export function passOf(world, c) {
 function setCell(nav, terrain, c, p) {
   const k = nav.k;
   nav.pass[c] = p;
+  nav.under[c] = p ? UNDER[terrain[c]] : 0;
   const land = (p & P_SLOW) ? k.rubble : terrain[c] === T.PARK ? k.park : 1;
-  nav.civCost[c] = (p & P_CIV) ? ((p & P_SLOW) ? k.rubble : 1) : 0;
-  const barrier = (p & P_WALL) ? k.wall : (p & P_GATE) ? k.gate : 0;
+  nav.civCost[c] = nav.civDyn[c] = (p & P_CIV) ? ((p & P_SLOW) ? k.rubble : 1) : 0;
+  const barrier = (p & P_WALL) ? (k.wall | BARRIER) : (p & P_GATE) ? (k.gate | BARRIER) : 0;
   nav.zCost[c] = barrier || ((p & P_ZOM) ? land : 0);
   nav.sCost[c] = barrier || ((p & P_SWIM) ? ((p & P_WATER) ? k.water : land) : 0);
 }
@@ -137,6 +145,7 @@ export function rebuildPass(world) {
     setCell(nav, terr, c, passOf(world, c));
     if (mask[c]) rc++;
   }
+  nav.dynList.length = 0;
   nav.regionCells = Math.max(1, rc);
   touchNav(world);
 }
@@ -160,9 +169,62 @@ export function touchNav(world) {
   for (const f of nav.corrFields) if (f) f.stale = true;
 }
 
-function startCivField(world) {
+// Civilian traversal cost for this rebuild: base cost + danger near zombies + queue cost on crowded gates.
+function dynamicCivCost(world) {
+  const nav = world.nav, dyn = nav.civDyn, base = nav.civCost, list = nav.dynList, cc = world.cfg.civ, g = world.grid;
+  for (let k = 0; k < list.length; k++) dyn[list[k]] = base[list[k]];
+  list.length = 0;
+  let extra = 0;
+  const sh = world.sh;
+  const dc = +cc.dangerCost || 0, dmax = Math.min(60, +cc.dangerMax || 0);
+  if (dc > 0 && dmax > 0 && world.counts[2] > 0 && sh) {
+    extra = dmax;
+    const r = Math.max(1, Math.round(sh.hcell / g.cell)), gw = g.gw, gh = g.gh, cntZ = sh.cntZ, hw = sh.hw;
+    for (let k = 0; k < sh.nz; k++) {
+      const hc = sh.zcells[k], z = cntZ[hc];
+      const add = Math.min(dmax, dc * z);
+      const hx = hc % hw, hy = (hc / hw) | 0;
+      const x0 = Math.max(1, (hx - 1) * r), x1 = Math.min(gw - 2, (hx + 2) * r - 1);
+      const y0 = Math.max(1, (hy - 1) * r), y1 = Math.min(gh - 2, (hy + 2) * r - 1);
+      for (let y = y0; y <= y1; y++) for (let c = y * gw + x0, e = y * gw + x1; c <= e; c++) {
+        const b = base[c];
+        if (!b) continue;
+        const v = dyn[c];
+        if (v === b) list.push(c);
+        dyn[c] = Math.min(b + dmax, v + add);
+      }
+    }
+  }
+  const per = +cc.gateQueuePer || 0, qmax = Math.min(60, +cc.gateQueueMax || 0);
+  if (per > 0 && qmax > 0 && sh && world.zones) {
+    extra += qmax;
+    const ri = Math.ceil((cc.gateQueueRadius || 16) * sh.inv), cntC = sh.cntC, hw = sh.hw;
+    for (const gt of world.zones.gates) {
+      const comp = world.zones.comps[gt.comp];
+      if (!(gt.hp > 0) || !comp || comp.breached) continue;
+      const hx = (gt.x * sh.inv) | 0, hy = (gt.y * sh.inv) | 0;
+      let n = 0;
+      for (let y = Math.max(0, hy - ri); y <= Math.min(sh.hh - 1, hy + ri); y++) for (let x = Math.max(0, hx - ri); x <= Math.min(hw - 1, hx + ri); x++) {
+        const fc = world.cellAt((x + 0.5) * sh.hcell, (y + 0.5) * sh.hcell);
+        if (fc >= 0 && !world.zoneId[fc]) n += cntC[y * hw + x];
+      }
+      const add = Math.min(qmax, Math.floor(n / per));
+      if (!add) continue;
+      for (const c of gt.cells) {
+        const b = base[c];
+        if (!b) continue;
+        if (dyn[c] === b) list.push(c);
+        dyn[c] = Math.min(127, dyn[c] + add);
+      }
+    }
+  }
+  return extra;
+}
+
+function startCivField(world, urgent) {
   const nav = world.nav, f = nav.civ, job = f.job, cfg = world.cfg;
-  job.begin(nav.civCost, Math.max(1, cfg.scent.rubbleCost | 0), Math.ceil(cfg.civ.seekMaxPath / world.grid.cell * 10));
+  const extra = dynamicCivCost(world);
+  job.begin(nav.civDyn, Math.max(1, cfg.scent.rubbleCost | 0) + extra, Math.ceil(cfg.civ.seekMaxPath / world.grid.cell * 10));
   const zz = world.zones;
   if (zz) for (const comp of zz.comps) {
     if (comp.breached) continue;
@@ -181,6 +243,7 @@ function startCivField(world) {
     pk.fx = pk.x; pk.fy = pk.y;
   }
   f.dirty = false;
+  f.urgent = urgent;
   f.last = world.t;
 }
 
@@ -200,31 +263,37 @@ function startScent(world, f, cost) {
   f.last = world.t;
 }
 
-// Big stages refresh the zombie fields less often so the amortised cost stays flat.
-function scentEvery(world) {
-  return Math.max(world.cfg.sim.scentEvery || 1, world.nav.regionCells / 200000);
+// Big stages refresh the fields less often so the amortised cost stays flat.
+function refreshEvery(world, base, perCells = 200000) {
+  return Math.max(base || 1, world.nav.regionCells / perCells);
 }
 
 // Computes every field synchronously (READY, restore, tests).
 export function computeFieldsNow(world) {
   const nav = world.nav;
-  startCivField(world); nav.civ.job.run(1e12); swap(nav.civ);
+  startCivField(world, true); nav.civ.job.run(1e12); swap(nav.civ);
   startScent(world, nav.scent, nav.zCost); nav.scent.job.run(1e12); swap(nav.scent);
   if (nav.swim || nav.swimmers > 0) { const sw = swimField(world); startScent(world, sw, nav.sCost); sw.job.run(1e12); swap(sw); }
 }
 
 export function navSystem(world) {
-  const nav = world.nav, cfg = world.cfg;
+  const nav = world.nav, cfg = world.cfg, dt = cfg.sim.dt;
   for (const pk of world.pickups) {
     const dx = pk.x - pk.fx, dy = pk.y - pk.fy;
     if (dx * dx + dy * dy > 64) { nav.civ.dirty = true; break; }
   }
   const civ = nav.civ;
-  if (!civ.job.active && civ.dirty) startCivField(world);
-  if (civ.job.active && civ.job.run(Math.max(12000, Math.min(26000, nav.regionCells >> 3)))) swap(civ);
+  const civEvery = refreshEvery(world, cfg.civ.fieldEvery, 45000);
+  // a change (breach, gate, zone) restarts a slow periodic rebuild as an urgent one
+  if (civ.job.active && !civ.urgent && civ.dirty) startCivField(world, true);
+  else if (!civ.job.active && (civ.dirty || (world.counts[2] > 0 && world.t - civ.last >= civEvery))) startCivField(world, civ.dirty);
+  if (civ.job.active) {
+    const budget = civ.urgent ? Math.max(12000, Math.min(26000, nav.regionCells >> 3)) : Math.max(6000, Math.ceil(nav.regionCells / Math.max(1, civEvery / dt * 0.6)));
+    if (civ.job.run(budget)) swap(civ);
+  }
 
-  const every = scentEvery(world);
-  const scentBudget = Math.max(8000, Math.ceil(nav.regionCells / Math.max(1, every / cfg.sim.dt * 0.8)));
+  const every = refreshEvery(world, cfg.sim.scentEvery);
+  const scentBudget = Math.max(8000, Math.ceil(nav.regionCells / Math.max(1, every / dt * 0.8)));
   const sf = nav.scent;
   if (!sf.job.active && world.t - sf.last >= every) startScent(world, sf, nav.zCost);
   if (sf.job.active && sf.job.run(scentBudget)) swap(sf);
@@ -233,6 +302,26 @@ export function navSystem(world) {
     if (!sw.job.active && world.t - sw.last >= every) startScent(world, sw, nav.sCost);
     if (sw.job.active && sw.job.run(scentBudget)) swap(sw);
   }
+}
+
+// True when the straight line from (x0,y0) to (x1,y1) only crosses fine cells with one of `bits`
+// (the start cell is not tested; a step through a cell corner tests one of its two side cells).
+export function lineClear(pass, gw, cs, x0, y0, x1, y1, bits) {
+  const inv = 1 / cs;
+  let cx = (x0 * inv) | 0, cy = (y0 * inv) | 0;
+  const ex = (x1 * inv) | 0, ey = (y1 * inv) | 0;
+  if (cx === ex && cy === ey) return true;
+  const dx = x1 - x0, dy = y1 - y0, sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+  const adx = dx > 0 ? dx : -dx, ady = dy > 0 ? dy : -dy;
+  let tx = adx > 1e-9 ? (sx > 0 ? (cx + 1) * cs - x0 : x0 - cx * cs) / adx : 1e30;
+  let ty = ady > 1e-9 ? (sy > 0 ? (cy + 1) * cs - y0 : y0 - cy * cs) / ady : 1e30;
+  const sdx = adx > 1e-9 ? cs / adx : 1e30, sdy = ady > 1e-9 ? cs / ady : 1e30;
+  for (let guard = (ex - cx) * sx + (ey - cy) * sy + 1; guard > 0; guard--) {
+    if (tx < ty) { cx += sx; tx += sdx; } else { cy += sy; ty += sdy; }
+    if (!(pass[cy * gw + cx] & bits)) return false;
+    if (cx === ex && cy === ey) return true;
+  }
+  return true;
 }
 
 // ---------- corridor fields (small local Dijkstra inside the corridor box) ----------

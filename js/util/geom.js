@@ -182,3 +182,77 @@ export function rectPoly(x0, y0, x1, y1) { return [x0, y0, x1, y0, x1, y1, x0, y
 
 export function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 export function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Supercover of a segment: every cell the segment touches (cells closed, grown by eps), one row at a time.
+// The cells form a 4-connected run and every point of the segment lies in one of them (floor(x / cell) mapping).
+export function rasterSegCover(ax, ay, bx, by, cell, gw, gh, cb, eps = 1e-3) {
+  const ymin = Math.min(ay, by), ymax = Math.max(ay, by), dx = bx - ax, dy = by - ay;
+  const cy0 = Math.max(0, Math.floor((ymin - eps) / cell)), cy1 = Math.min(gh - 1, Math.floor((ymax + eps) / cell));
+  const flat = Math.abs(dy) < 1e-9;
+  for (let cy = cy0; cy <= cy1; cy++) {
+    let xa, xb;
+    if (flat) { xa = Math.min(ax, bx); xb = Math.max(ax, bx); }
+    else {
+      const ya = Math.max(ymin, cy * cell - eps), yb = Math.min(ymax, (cy + 1) * cell + eps);
+      xa = ax + dx * (ya - ay) / dy; xb = ax + dx * (yb - ay) / dy;
+      if (xa > xb) { const s = xa; xa = xb; xb = s; }
+    }
+    const c0 = Math.max(0, Math.floor((xa - eps) / cell)), c1 = Math.min(gw - 1, Math.floor((xb + eps) / cell));
+    for (let cx = c0; cx <= c1; cx++) cb(cy * gw + cx, cx, cy);
+  }
+}
+
+// Boundary of the union of polygons as segments [ax,ay,bx,by, ...]: the pieces of each edge with the union's
+// inside on exactly one side (edges inside another polygon or shared by two touching polygons are dropped).
+export function unionBoundary(polys, eps = 0.02) {
+  const boxes = polys.map(polyBBox);
+  const inside = (x, y) => {
+    for (let k = 0; k < polys.length; k++) {
+      const b = boxes[k];
+      if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3] && pointInPoly(polys[k], x, y)) return true;
+    }
+    return false;
+  };
+  const out = [], ts = [];
+  for (let k = 0; k < polys.length; k++) {
+    const p = polys[k], n = p.length;
+    for (let i = 0; i < n; i += 2) {
+      const j = (i + 2) % n, ax = p[i], ay = p[i + 1], bx = p[j], by = p[j + 1];
+      const L = Math.hypot(bx - ax, by - ay);
+      if (L < 1e-6) continue;
+      const nx = -(by - ay) / L * eps, ny = (bx - ax) / L * eps;
+      ts.length = 0; ts.push(0, 1);
+      const ex0 = Math.min(ax, bx), ex1 = Math.max(ax, bx), ey0 = Math.min(ay, by), ey1 = Math.max(ay, by);
+      for (let q = 0; q < polys.length; q++) {
+        if (q === k) continue;
+        const b = boxes[q];
+        if (b[0] > ex1 || b[2] < ex0 || b[1] > ey1 || b[3] < ey0) continue;
+        const o = polys[q], m = o.length;
+        for (let u = 0; u < m; u += 2) {
+          const v = (u + 2) % m, t = segIntersect(ax, ay, bx, by, o[u], o[u + 1], o[v], o[v + 1]);
+          if (t > 0 && t < 1) ts.push(t);
+        }
+      }
+      ts.sort((a, b) => a - b);
+      let open = -1;
+      for (let s = 0; s + 1 < ts.length; s++) {
+        const t0 = ts[s], t1 = ts[s + 1];
+        if ((t1 - t0) * L < 1e-4) continue;
+        const tm = (t0 + t1) * 0.5, mx = ax + (bx - ax) * tm, my = ay + (by - ay) * tm;
+        const keep = inside(mx + nx, my + ny) !== inside(mx - nx, my - ny);
+        if (keep && open < 0) open = t0;
+        if (!keep && open >= 0) { out.push(ax + (bx - ax) * open, ay + (by - ay) * open, ax + (bx - ax) * t0, ay + (by - ay) * t0); open = -1; }
+      }
+      if (open >= 0) out.push(ax + (bx - ax) * open, ay + (by - ay) * open, bx, by);
+    }
+  }
+  return out;
+}
+
+// Distance from (px,py) to the segment that starts at (ax,ay) with unit direction (ux,uy) and length L.
+export function distToSegU(px, py, ax, ay, ux, uy, L) {
+  const rx = px - ax, ry = py - ay, t = rx * ux + ry * uy;
+  if (t <= 0) return Math.sqrt(rx * rx + ry * ry);
+  if (t >= L) { const ex = rx - ux * L, ey = ry - uy * L; return Math.sqrt(ex * ex + ey * ey); }
+  return Math.abs(rx * uy - ry * ux);
+}

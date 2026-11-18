@@ -1,8 +1,8 @@
 // Unit weapons: stats with upgrades and auras, targeting, fire, shells, ammo and reloads, traps, unit damage.
 import { T } from '../map/format.js';
 import { rasterPolyline } from '../util/geom.js';
-import { ZOMBIE, ZSUB, M_ZOMBIE } from './agents.js';
-import { P_ZOM, P_SWIM, isWalkTerrain } from './nav.js';
+import { ZOMBIE, ZSUB, M_ZOMBIE, zombieHp } from './agents.js';
+import { P_ZOM, P_SWIM, INF, isWalkTerrain } from './nav.js';
 
 export const abilityKey = (id) => 'ability:' + id;
 
@@ -88,6 +88,7 @@ export function makeCombatState() {
     started: false, shells: [], pending: [], squads: [], rallies: [], mutants: [], kinds: {},
     byId: new Map(), brushAt: new Map(), c4At: new Map(), spikeAt: new Map(), oilAt: new Map(),
     lineMask: null, lineCount: 0, snipers: 0, nextGroup: 1, nextVeh: 1, nextStrike: 1, snd: {}, shotN: 0, logT: {},
+    shellVer: 0, tg: null,
   };
 }
 
@@ -190,86 +191,366 @@ export function nearestZombie(world, x, y, r) {
   return world.counts[ZOMBIE] > 0 && zombiesNear(world, x, y, r) ? world.nearest(x, y, r, M_ZOMBIE) : -1;
 }
 
-function nearestMutant(world, x, y, r) {
-  const A = world.A, list = world.combat.mutants;
-  let best = -1, bd = r * r;
-  for (let k = 0; k < list.length; k++) {
-    const i = list[k];
-    if (A.type[i] !== ZOMBIE || !A.sub[i]) continue;
-    const dx = A.x[i] - x, dy = A.y[i] - y, d2 = dx * dx + dy * dy;
-    if (d2 <= bd) { bd = d2; best = i; }
-  }
-  return best;
-}
-
 function refreshMutants(world) {
   const A = world.A, list = world.combat.mutants;
   list.length = 0;
   for (let i = 0, n = A.n; i < n; i++) if (A.type[i] === ZOMBIE && A.sub[i]) list.push(i);
 }
 
-const CAND = new Int32Array(64), CANDN = new Int32Array(64);
+// ---------------------------------------------------------------- target choice
+// Everything here is derived from sim state and rebuilt on demand (never saved): claims are the expected damage
+// shooters put on each zombie slot over the last claimSec, reservations are the shells still in flight (bucketed by
+// 32 m block), and threat comes from the zombie scent field (path distance to the nearest person; walls and gates
+// count extra, so zombies at a zone's wall rank high).
+const MAXP = 512, MAXR = 2048;
 
-// Densest zombie cluster inside the ring [minR, maxR] around (x, y), sampled from the spatial hash's 32 m block counts.
-// Picks among the strongest blocks with world.rng so several guns spread their fire. Returns [x, y, count] or null.
-export function pickCluster(world, x, y, minR, maxR) {
-  if (world.counts[ZOMBIE] <= 0) return null;
+function tgState(world) {
+  const C = world.combat, sh = world.sh, g = world.grid, nb = sh.bzw * sh.bzh, cap = world.A.cap, tc = world.cfg.targeting || {};
+  return (C.tg = {
+    win: Math.max(1, Math.round((tc.claimSec ?? 0.5) / world.cfg.sim.dt)),
+    tk: tc.threatMul ?? 3, td: Math.max(1, tc.threatDist ?? 40), dm: g.cell / 10, gi: 1 / g.cell, gw: g.gw,
+    cand: tc.directCand || 24, armedCand: tc.armedCand || 10, artyCand: tc.artyCand || 5,
+    hpTick: -1, hp: new Float64Array(8),
+    cv: new Float32Array(cap), ct: new Int32Array(cap),
+    ver: -1, gen: 0, bHead: new Int32Array(nb), bStamp: new Int32Array(nb), eShell: new Int32Array(256), eNext: new Int32Array(256),
+    dist: null, distRef: null, distLast: NaN, epoch: 1, thrB: new Float32Array(nb), thrStamp: new Int32Array(nb),
+    cb: new Int32Array(16), cs: new Float64Array(16),
+    px: new Float64Array(MAXR), py: new Float64Array(MAXR), ph: new Float64Array(MAXR), pt: new Float64Array(MAXR),
+    aim: [0, 0, 0, 0],
+  });
+}
+
+function tgSync(world) {
+  const S = world.combat.tg || tgState(world);
+  if (S.hpTick !== world.tick) {
+    S.hpTick = world.tick;
+    for (let k = 0; k < 5; k++) S.hp[k] = zombieHp(world, k);
+    const f = world.nav && world.nav.scent, d = f && f.dist;
+    if (!d || d.length !== world.grid.gw * world.grid.gh) S.dist = null;
+    else {
+      if (d !== S.distRef || f.last !== S.distLast) { S.distRef = d; S.distLast = f.last; S.epoch++; }
+      S.dist = d;
+    }
+  }
+  return S;
+}
+
+const hpLeft = (S, A, i) => A.hp[i] * S.hp[A.sub[i]] + A.shield[i];
+
+function claimAt(S, tick, i) {
+  if (i >= S.ct.length) return 0;
+  const age = tick + 1 - S.ct[i];
+  return age < 0 || age >= S.win ? 0 : S.cv[i] * (S.win - age) / S.win;
+}
+
+// Expected damage a shooter just put on zombie i; other shooters treat it as covered for claimSec.
+export function addClaim(world, i, e) {
+  if (!world.combat || i < 0 || !(e > 0)) return;
+  const S = tgSync(world), t = world.tick;
+  if (i >= S.ct.length) {
+    const cap = Math.max(world.A.cap, S.ct.length * 2), cv = new Float32Array(cap), ct = new Int32Array(cap);
+    cv.set(S.cv); ct.set(S.ct); S.cv = cv; S.ct = ct;
+  }
+  S.cv[i] = claimAt(S, t, i) + e;
+  S.ct[i] = t + 1;
+}
+
+function thrOf(S, v) { return v === undefined || v === INF ? 1 : 1 + S.tk * S.td / (S.td + v * S.dm); }
+
+function thrAt(S, x, y) {
+  return S.dist ? thrOf(S, S.dist[((y * S.gi) | 0) * S.gw + ((x * S.gi) | 0)]) : 1;
+}
+
+// Threat of a 32 m block: from the lowest scent distance among its cells, cached until the scent field changes.
+function thrBlock(world, S, b) {
+  if (!S.dist) return 1;
+  if (S.thrStamp[b] === S.epoch) return S.thrB[b];
+  const sh = world.sh, g = world.grid, bz = sh.bz, bx = b % sh.bzw, by = (b / sh.bzw) | 0, d = S.dist;
+  const x0 = Math.floor(bx * bz * S.gi), y0 = Math.floor(by * bz * S.gi);
+  const x1 = Math.min(g.gw - 1, Math.ceil((bx + 1) * bz * S.gi) - 1), y1 = Math.min(g.gh - 1, Math.ceil((by + 1) * bz * S.gi) - 1);
+  let m = INF;
+  for (let cy = y0; cy <= y1; cy++) { const row = cy * g.gw; for (let cx = x0; cx <= x1; cx++) { const v = d[row + cx]; if (v < m) m = v; } }
+  const t = thrOf(S, m);
+  S.thrB[b] = t; S.thrStamp[b] = S.epoch;
+  return t;
+}
+
+// Buckets the shells in flight by every 32 m block their blast overlaps (rebuilt whenever the shell list changes).
+function shellBuckets(world, S) {
+  const C = world.combat;
+  if (S.ver === C.shellVer) return;
+  S.ver = C.shellVer;
+  const gen = ++S.gen, list = C.shells, sh = world.sh, ib = 1 / sh.bz, bw = sh.bzw, bh = sh.bzh;
+  let ne = 0;
+  for (let k = 0; k < list.length; k++) {
+    const s = list[k], r = s.r || 0;
+    const bx0 = Math.max(0, ((s.x - r) * ib) | 0), bx1 = Math.min(bw - 1, ((s.x + r) * ib) | 0);
+    const by0 = Math.max(0, ((s.y - r) * ib) | 0), by1 = Math.min(bh - 1, ((s.y + r) * ib) | 0);
+    for (let by = by0; by <= by1; by++) for (let bx = bx0; bx <= bx1; bx++) {
+      if (ne >= S.eShell.length) {
+        const a = new Int32Array(ne * 2), n2 = new Int32Array(ne * 2);
+        a.set(S.eShell); n2.set(S.eNext); S.eShell = a; S.eNext = n2;
+      }
+      const b = by * bw + bx;
+      S.eShell[ne] = k; S.eNext[ne] = S.bStamp[b] === gen ? S.bHead[b] : -1; S.bHead[b] = ne; S.bStamp[b] = gen; ne++;
+    }
+  }
+}
+
+// Shells in flight at (x, y): expected damage (kind 0), or 1 if a gas (kind 1) / fire (kind 2) shell already covers it.
+function incoming(world, S, x, y, kind) {
+  const sh = world.sh, bx = (x / sh.bz) | 0, by = (y / sh.bz) | 0;
+  if (bx < 0 || by < 0 || bx >= sh.bzw || by >= sh.bzh) return 0;
+  const b = by * sh.bzw + bx;
+  if (S.bStamp[b] !== S.gen) return 0;
+  const list = world.combat.shells;
+  let v = 0;
+  for (let e = S.bHead[b]; e >= 0; e = S.eNext[e]) {
+    const s = list[S.eShell[e]], r = s.r, dx = s.x - x, dy = s.y - y, d2 = dx * dx + dy * dy;
+    if (!(r > 0) || d2 > r * r) continue;
+    if (kind === 0) { if (s.dmg > 0) v += s.dmg * (1 - 0.75 * Math.sqrt(d2) / r); }
+    else if (kind === 1 ? s.stunSec > 0 : s.fire > 0) return 1;
+  }
+  return v;
+}
+
+// Rough share of a block's zombies that shells in flight will already deal with.
+function blockCover(world, S, b, kind, hp0) {
+  if (S.bStamp[b] !== S.gen) return 0;
+  const sh = world.sh, bz = sh.bz, x0 = (b % sh.bzw) * bz, y0 = ((b / sh.bzw) | 0) * bz, list = world.combat.shells;
+  let f = 0;
+  for (let e = S.bHead[b]; e >= 0; e = S.eNext[e]) {
+    const s = list[S.eShell[e]], r = s.r;
+    let k;
+    if (kind === 0) { if (!(s.dmg > 0)) continue; k = Math.min(1, s.dmg * 0.6 / hp0); }
+    else if (kind === 1 ? s.stunSec > 0 : s.fire > 0) k = 1;
+    else continue;
+    const ox = Math.min(s.x + r, x0 + bz) - Math.max(s.x - r, x0), oy = Math.min(s.y + r, y0 + bz) - Math.max(s.y - r, y0);
+    if (ox <= 0 || oy <= 0) continue;
+    f += ox * oy * 1.18 * k / (bz * bz);
+    if (f >= 1) return 1;
+  }
+  return f;
+}
+
+// Direct fire: among the nearest `cap` zombies within r of (x, y), the one most dangerous to people that other
+// shooters have not already covered (claims), nearer first. mode 1 (snipers) prefers far targets with HP to spare.
+// shot = expected damage of one shot. Falls back to a covered zombie rather than idling.
+export function pickDirect(world, x, y, r, shot, mode = 0, cap = 0) {
+  if (world.counts[ZOMBIE] <= 0 || !(r > 0)) return -1;
+  const S = tgSync(world), tick = world.tick;
   const sh = world.sh, bz = sh.bz, ib = 1 / bz, blk = sh.blkZ, bw = sh.bzw, bh = sh.bzh;
+  const hw = sh.hw, hh = sh.hh, headZ = sh.headZ, next = sh.next, per = Math.max(1, Math.round(bz / sh.hcell));
+  const A = world.A, type = A.type, X = A.x, Y = A.y;
+  const r2 = r * r, ir = 1 / r, bx0 = (x * ib) | 0, by0 = (y * ib) | 0, K = Math.ceil(r * ib) + 1, lim = cap || S.cand;
+  const sp = shot > 0 ? shot : 1;
+  let best = -1, bs = -1, seen = 0;
+  for (let k = 0; k <= K && seen < lim; k++) {
+    const ya = by0 - k, yb = by0 + k;
+    for (let by = ya; by <= yb; by++) {
+      if (by < 0 || by >= bh) continue;
+      const step = by === ya || by === yb ? 1 : 2 * k, ny = y < by * bz ? by * bz - y : y > (by + 1) * bz ? y - (by + 1) * bz : 0;
+      for (let bx = bx0 - k; bx <= bx0 + k; bx += step) {
+        if (bx < 0 || bx >= bw || !blk[by * bw + bx]) continue;
+        const nx = x < bx * bz ? bx * bz - x : x > (bx + 1) * bz ? x - (bx + 1) * bz : 0;
+        if (nx * nx + ny * ny > r2) continue;
+        const cy1 = Math.min(hh, (by + 1) * per), cx1 = Math.min(hw, (bx + 1) * per);
+        for (let cy = by * per; cy < cy1; cy++) for (let cx = bx * per; cx < cx1; cx++) {
+          for (let j = headZ[cy * hw + cx]; j >= 0; j = next[j]) {
+            if (type[j] !== ZOMBIE) continue;
+            const dx = X[j] - x, dy = Y[j] - y, d2 = dx * dx + dy * dy;
+            if (d2 > r2) continue;
+            seen++;
+            const unc = hpLeft(S, A, j) - claimAt(S, tick, j), f = Math.sqrt(d2) * ir, thr = thrAt(S, X[j], Y[j]);
+            let s = mode === 1 ? thr * (0.4 + 0.6 * Math.max(0, Math.min(1, unc / sp))) * (0.6 + 0.4 * f) : thr * (1 - 0.4 * f);
+            if (unc <= 0) s *= 0.02;
+            if (s > bs) { bs = s; best = j; }
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function nearestMutant(world, x, y, r) {
+  const A = world.A, list = world.combat.mutants, S = tgSync(world), tick = world.tick;
+  let best = -1, bd = r * r, alt = -1, ad = r * r;
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k];
+    if (A.type[i] !== ZOMBIE || !A.sub[i]) continue;
+    const dx = A.x[i] - x, dy = A.y[i] - y, d2 = dx * dx + dy * dy;
+    if (hpLeft(S, A, i) - claimAt(S, tick, i) > 0) { if (d2 <= bd) { bd = d2; best = i; } }
+    else if (d2 <= ad) { ad = d2; alt = i; }
+  }
+  return best >= 0 ? best : alt;
+}
+
+// Artillery: the aim point inside the ring [minR, maxR] around (x, y) with the highest expected value, i.e.
+// zombies the salvo would hurt that shells already in flight will not, times their threat. Blocks are ranked cheaply
+// first, then the best few are refined on zombie positions predicted at landing (lead by flight time).
+// w: { r, dmg, n, spread (salvo scatter), speed, kind 0 damage / 1 gas / 2 fire, minC (heavy guns), ox, oy (muzzle) }.
+// Returns a shared [x, y, value, count] or null when nothing in range is left uncovered.
+export function pickArty(world, x, y, minR, maxR, w) {
+  if (world.counts[ZOMBIE] <= 0) return null;
+  const S = tgSync(world);
+  shellBuckets(world, S);
+  const sh = world.sh, bz = sh.bz, ib = 1 / bz, blk = sh.blkZ, bw = sh.bzw, bh = sh.bzh, kind = w.kind | 0;
   const bx0 = Math.max(0, ((x - maxR) * ib) | 0), bx1 = Math.min(bw - 1, ((x + maxR) * ib) | 0);
   const by0 = Math.max(0, ((y - maxR) * ib) | 0), by1 = Math.min(bh - 1, ((y + maxR) * ib) | 0);
   const lo = Math.max(0, minR - bz * 0.5), hi = maxR + bz * 0.25, lo2 = lo * lo, hi2 = hi * hi;
-  let best = 0;
+  const K = Math.min(16, kind ? S.artyCand + 3 : S.artyCand), cb = S.cb, cs = S.cs, hp0 = S.hp[0] || 1, minC = w.minC || 1;
+  let nc = 0;
   for (let by = by0; by <= by1; by++) {
     const cy = (by + 0.5) * bz - y, row = by * bw;
     for (let bx = bx0; bx <= bx1; bx++) {
       const n = blk[row + bx];
-      if (n <= best) continue;
+      if (!n) continue;
       const cx = (bx + 0.5) * bz - x, d2 = cx * cx + cy * cy;
       if (d2 < lo2 || d2 > hi2) continue;
-      best = n;
+      const b = row + bx, ne = n * (1 - blockCover(world, S, b, kind, hp0));
+      if (ne < 0.25) continue;
+      let sc = ne * thrBlock(world, S, b) * (1 - 0.15 * Math.sqrt(d2) / hi);
+      if (ne < minC) sc *= 0.1;
+      if (nc === K && sc <= cs[K - 1]) continue;
+      let p = nc < K ? nc++ : K - 1;
+      while (p > 0 && cs[p - 1] < sc) { cs[p] = cs[p - 1]; cb[p] = cb[p - 1]; p--; }
+      cs[p] = sc; cb[p] = b;
     }
   }
-  if (!best) return null;
-  let nc = 0, tot = 0;
-  const floor = Math.max(1, best * 0.5);
-  for (let by = by0; by <= by1 && nc < 64; by++) {
-    const cy = (by + 0.5) * bz - y, row = by * bw;
-    for (let bx = bx0; bx <= bx1 && nc < 64; bx++) {
-      const n = blk[row + bx];
-      if (n < floor) continue;
-      const cx = (bx + 0.5) * bz - x, d2 = cx * cx + cy * cy;
-      if (d2 < lo2 || d2 > hi2) continue;
-      CAND[nc] = row + bx; CANDN[nc] = n; nc++; tot += n;
-    }
-  }
-  let r = world.rng.next() * tot, pick = CAND[0];
-  for (let k = 0; k < nc; k++) { r -= CANDN[k]; if (r <= 0) { pick = CAND[k]; break; } }
-  const px = (pick % bw + 0.5) * bz, py = (((pick / bw) | 0) + 0.5) * bz;
-  const A = world.A;
-  let sx = 0, sy = 0, n = 0;
-  const lo1 = Math.max(0, minR), hi1 = maxR;
-  world.query(px, py, bz * 0.75, M_ZOMBIE, (i) => {
-    const dx = A.x[i] - x, dy = A.y[i] - y, d2 = dx * dx + dy * dy;
-    if (d2 < lo1 * lo1 || d2 > hi1 * hi1) return;
-    sx += A.x[i]; sy += A.y[i]; n++;
-  });
-  if (!n) return null;
-  const ax = sx / n, ay = sy / n, d = Math.hypot(ax - x, ay - y);
-  if (d < lo1 || d > hi1) {
-    let j = -1;
-    world.query(px, py, bz * 0.75, M_ZOMBIE, (i) => {
-      const dx = A.x[i] - x, dy = A.y[i] - y, d2 = dx * dx + dy * dy;
-      if (d2 >= lo1 * lo1 && d2 <= hi1 * hi1) { j = i; return false; }
+  if (!nc) return null;
+  const A = world.A, X = A.x, Y = A.y, VX = A.vx, VY = A.vy, ST = A.stun;
+  const ox = w.ox ?? x, oy = w.oy ?? y, r = w.r || 8, spread = w.spread || 0, salvo = spread > r * 0.5, shells = Math.max(1, w.n || 1);
+  const Rev = salvo ? spread + r : r, Rev2 = Rev * Rev, q = bz * 0.75 + Rev, speed = w.speed || 150, lo1 = Math.max(0, minR), hi1 = maxR;
+  const hit = salvo ? shells * Math.min(1, (r * r) / (spread * spread)) * 0.6 : shells;
+  const fire = world.fire, nav = world.nav, cinv = 1 / nav.ccell, cgw = nav.cgw, mw = world.map.w - 1, mh = world.map.h - 1;
+  const PX = S.px, PY = S.py, PH = S.ph, PT = S.pt, own2 = bz * bz * 0.5625;
+  let bev = 0, bax = 0, bay = 0, bn = 0;
+  for (let c = 0; c < nc; c++) {
+    const b = cb[c], cx = (b % bw + 0.5) * bz, cy = (((b / bw) | 0) + 0.5) * bz;
+    const T0 = Math.hypot(cx - ox, cy - oy) / speed;
+    let np = 0;
+    world.query(cx, cy, q, M_ZOMBIE, (i) => {
+      if (np >= MAXP) return false;
+      const mv = T0 - ST[i];
+      let px = X[i], py = Y[i];
+      if (mv > 0) { px += VX[i] * mv; py += VY[i] * mv; px = px < 1 ? 1 : px > mw ? mw : px; py = py < 1 ? 1 : py > mh ? mh : py; }
+      let h = 1;
+      if (kind === 0) { h = hpLeft(S, A, i) - incoming(world, S, px, py, 0); if (h <= 0) return; }
+      else if (kind === 1) { if (ST[i] > T0 + 0.5 || incoming(world, S, px, py, 1)) return; }
+      else if (fire[((py * cinv) | 0) * cgw + ((px * cinv) | 0)] > 0 || incoming(world, S, px, py, 2)) return;
+      PX[np] = px; PY[np] = py; PH[np] = h; PT[np] = thrAt(S, px, py); np++;
     });
-    return j >= 0 ? [A.x[j], A.y[j], n] : null;
+    if (!np) continue;
+    let ax = 0, ay = 0, sw = 0;
+    for (let k = 0; k < np; k++) {
+      const dx = PX[k] - cx, dy = PY[k] - cy;
+      if (dx * dx + dy * dy <= own2) { ax += PX[k] * PT[k]; ay += PY[k] * PT[k]; sw += PT[k]; }
+    }
+    if (!sw) continue;
+    ax /= sw; ay /= sw;
+    for (let it = 0; it < 2; it++) {
+      let sx = 0, sy = 0, s2 = 0;
+      for (let k = 0; k < np; k++) {
+        const dx = PX[k] - ax, dy = PY[k] - ay;
+        if (dx * dx + dy * dy <= Rev2) { sx += PX[k] * PT[k]; sy += PY[k] * PT[k]; s2 += PT[k]; }
+      }
+      if (s2) { ax = sx / s2; ay = sy / s2; }
+    }
+    const dd = Math.hypot(ax - x, ay - y);
+    if (dd < lo1 || dd > hi1) {
+      let kb = -1, tb = -1;
+      for (let k = 0; k < np; k++) {
+        const d = Math.hypot(PX[k] - x, PY[k] - y);
+        if (d >= lo1 && d <= hi1 && PT[k] > tb) { tb = PT[k]; kb = k; }
+      }
+      if (kb < 0) continue;
+      ax = PX[kb]; ay = PY[kb];
+    }
+    let ev = 0, n = 0;
+    for (let k = 0; k < np; k++) {
+      const dx = PX[k] - ax, dy = PY[k] - ay, d2 = dx * dx + dy * dy;
+      if (d2 > Rev2) continue;
+      n++;
+      if (kind) { ev += PT[k]; continue; }
+      const d = Math.sqrt(d2);
+      const dmg = (w.dmg || 0) * hit * (salvo ? Math.min(1, Math.max(0, (spread + r - d) / (2 * r))) : 1 - 0.75 * d / r);
+      ev += PT[k] * Math.max(0.2, Math.min(1, dmg / PH[k]));
+    }
+    if (ev > bev) { bev = ev; bax = ax; bay = ay; bn = n; }
   }
-  return [ax, ay, n];
+  if (!(bev > 0)) return null;
+  const out = S.aim;
+  out[0] = bax; out[1] = bay; out[2] = bev; out[3] = bn;
+  return out;
+}
+
+// Kept for callers that only need a plain damage aim point. Returns [x, y, count] or null.
+export function pickCluster(world, x, y, minR, maxR) {
+  const a = pickArty(world, x, y, minR, maxR, { r: 12, dmg: 40, n: 1, speed: 150, kind: 0 });
+  return a ? [a[0], a[1], a[3]] : null;
+}
+
+// Rail cannon: the line from (x, y) that crosses the most uncovered zombies (weighted by threat), tried through a
+// sample of the zombies in range. Returns a shared [x, y, value, count] aim point on that line, or null.
+export function pickRail(world, x, y, range, hw) {
+  if (world.counts[ZOMBIE] <= 0) return null;
+  const S = tgSync(world), tick = world.tick;
+  shellBuckets(world, S);
+  const sh = world.sh, bz = sh.bz, ib = 1 / bz, blk = sh.blkZ, bw = sh.bzw, bh = sh.bzh;
+  const hcw = sh.hw, hch = sh.hh, headZ = sh.headZ, next = sh.next, per = Math.max(1, Math.round(bz / sh.hcell));
+  const A = world.A, type = A.type, X = A.x, Y = A.y, r2 = range * range, reach = range + bz * 0.71, reach2 = reach * reach;
+  const bx0 = Math.max(0, ((x - range) * ib) | 0), bx1 = Math.min(bw - 1, ((x + range) * ib) | 0);
+  const by0 = Math.max(0, ((y - range) * ib) | 0), by1 = Math.min(bh - 1, ((y + range) * ib) | 0);
+  const PX = S.px, PY = S.py, PT = S.pt;
+  let np = 0;
+  for (let by = by0; by <= by1 && np < MAXR; by++) {
+    const cy = (by + 0.5) * bz - y;
+    for (let bx = bx0; bx <= bx1 && np < MAXR; bx++) {
+      if (!blk[by * bw + bx]) continue;
+      const cx = (bx + 0.5) * bz - x;
+      if (cx * cx + cy * cy > reach2) continue;
+      const cy1 = Math.min(hch, (by + 1) * per), cx1 = Math.min(hcw, (bx + 1) * per);
+      for (let gy = by * per; gy < cy1; gy++) for (let gx = bx * per; gx < cx1; gx++) {
+        for (let j = headZ[gy * hcw + gx]; j >= 0 && np < MAXR; j = next[j]) {
+          if (type[j] !== ZOMBIE) continue;
+          const dx = X[j] - x, dy = Y[j] - y;
+          if (dx * dx + dy * dy > r2) continue;
+          if (hpLeft(S, A, j) - incoming(world, S, X[j], Y[j], 0) - claimAt(S, tick, j) <= 0) continue;
+          PX[np] = X[j]; PY[np] = Y[j]; PT[np] = thrAt(S, X[j], Y[j]); np++;
+        }
+      }
+    }
+  }
+  if (!np) return null;
+  const step = Math.max(1, Math.ceil(np / 48));
+  let bv = 0, ba = -1, bc = 0;
+  for (let a = 0; a < np; a += step) {
+    let dx = PX[a] - x, dy = PY[a] - y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 1) continue;
+    dx /= d; dy /= d;
+    let v = 0, c = 0;
+    for (let k = 0; k < np; k++) {
+      const ox = PX[k] - x, oy = PY[k] - y, along = ox * dx + oy * dy;
+      if (along < 0 || along > range) continue;
+      const perp = oy * dx - ox * dy;
+      if (perp > hw || perp < -hw) continue;
+      v += PT[k]; c++;
+    }
+    if (v > bv) { bv = v; ba = a; bc = c; }
+  }
+  if (ba < 0) return null;
+  const out = S.aim;
+  out[0] = PX[ba]; out[1] = PY[ba]; out[2] = bv; out[3] = bc;
+  return out;
 }
 
 // Queues an exploding shell that lands at world.t + dur and calls world.damageArea.
 // o: { r, dmg, src, friendly, stunSec, fire, bldgDmg, bridgeDmg, wallDmg, fx, fxR, snd, u }
 export function queueShell(world, x, y, dur, o) {
   world.combat.shells.push({ at: world.t + Math.max(0, dur), x, y, ...o });
+  world.combat.shellVer++;
 }
 
 // Kills credited to one source key during fn() (damageArea does not report them).
@@ -287,6 +568,7 @@ function landShells(world) {
   const due = [];
   for (let k = 0; k < list.length; k++) { const s = list[k]; if (s.at <= t + 1e-9) due.push(s); else list[w++] = s; }
   list.length = w;
+  if (due.length) world.combat.shellVer++;
   for (const s of due) {
     const kills = creditKills(world, s.src, () => world.damageArea(s.x, s.y, s.r, s.dmg || 0, s));
     if (s.u) s.u.kills += kills;
@@ -364,19 +646,20 @@ function gunReady(world, u, s, dt) {
 }
 
 // ---------------------------------------------------------------- weapons
-function acquireDirect(world, u, s) {
+// Keeps its target while it lives and stays in range; re-picks at once when it is lost (a kill by anyone).
+function acquireDirect(world, u, s, acc) {
   const A = world.A, r = s.range, r2 = r * r;
-  let t = u.tgt;
+  let t = u.tgt, lost = false;
   if (t >= 0) {
-    if (A.type[t] !== ZOMBIE) t = -1;
-    else { const dx = A.x[t] - u.x, dy = A.y[t] - u.y; if (dx * dx + dy * dy > r2) t = -1; }
+    if (A.type[t] !== ZOMBIE) { t = -1; lost = true; }
+    else { const dx = A.x[t] - u.x, dy = A.y[t] - u.y; if (dx * dx + dy * dy > r2) { t = -1; lost = true; } }
   }
   const wantMutant = s.priority === 'mutant' && world.combat.mutants.length > 0;
   if (t >= 0 && !(wantMutant && !A.sub[t] && world.t >= u.scanT)) return t;
-  if (t < 0 && world.t < u.scanT) return -1;
+  if (t < 0 && !lost && world.t < u.scanT) return -1;
   u.scanT = world.t + SCAN_SEC + (u.id % 5) * 0.04;
   let n = wantMutant ? nearestMutant(world, u.x, u.y, r) : -1;
-  if (n < 0 && t < 0) n = nearestZombie(world, u.x, u.y, r);
+  if (n < 0 && t < 0) n = pickDirect(world, u.x, u.y, r, (s.dmg || 0) * acc, s.priority === 'mutant' ? 1 : 0);
   if (n >= 0) t = n;
   u.tgt = t;
   return t;
@@ -384,9 +667,10 @@ function acquireDirect(world, u, s) {
 
 function fireDirect(world, u, s, dt) {
   if (!gunReady(world, u, s, dt)) return;
-  const t = acquireDirect(world, u, s);
+  const acc = s.accuracy ?? world.cfg.armed.accuracy ?? 0.8;
+  const t = acquireDirect(world, u, s, acc);
   if (t < 0) { u.cd = 0; return; }
-  const A = world.A, rng = world.rng, acc = s.accuracy ?? world.cfg.armed.accuracy ?? 0.8;
+  const A = world.A, rng = world.rng;
   const tx = A.x[t], ty = A.y[t];
   let shots = 0;
   while (u.cd <= 0 && u.ammo > 0 && shots < 6) {
@@ -394,6 +678,7 @@ function fireDirect(world, u, s, dt) {
     u.cd += s.rof;
     if (rng.next() < acc && world.damageAgent(t, s.dmg, u.type)) { u.kills++; u.tgt = -1; u.scanT = 0; break; }
   }
+  if (A.type[t] === ZOMBIE) addClaim(world, t, shots * s.dmg * acc);
   u.ax = tx; u.ay = ty; u.fireT = world.t;
   const sniper = u.type === 'sniper';
   world.projectiles.push({ kind: 'tracer', x0: u.x, y0: u.y, x1: tx, y1: ty, t0: world.t, dur: sniper ? 0.12 : 0.06, src: u.type });
@@ -401,13 +686,19 @@ function fireDirect(world, u, s, dt) {
   else world.combat.shotN += shots;
 }
 
+const ARTY_W = { r: 8, dmg: 0, n: 1, spread: 0, speed: 150, kind: 0, minC: 1, ox: 0, oy: 0 };
+
 function fireArty(world, u, s, dt) {
   if (!gunReady(world, u, s, dt)) return;
   if (world.t < u.scanT) return;
-  const aim = pickCluster(world, u.x, u.y, s.minRange || 0, s.range);
-  if (!aim) { u.scanT = world.t + 0.5 + (u.id % 5) * 0.05; u.cd = 0; return; }
+  const n = Math.max(1, s.shells || s.rockets || 1), W = ARTY_W;
+  W.r = s.splash || 8; W.dmg = s.dmg || 0; W.n = n; W.spread = s.spread || (n > 1 ? (s.splash || 10) * 1.5 : 0);
+  W.speed = s.shellSpeed || 150; W.kind = s.stunSec ? 1 : s.fire ? 2 : 0; W.minC = world.cfg.units[u.type].minCluster || 1;
+  W.ox = u.x; W.oy = u.y;
+  const pick = pickArty(world, u.x, u.y, s.minRange || 0, s.range, W);
+  if (!pick) { u.scanT = world.t + 0.5 + (u.id % 5) * 0.05; u.cd = 0; return; }
+  const aim = [pick[0], pick[1]];
   const rng = world.rng, ff = world.cfg.friendlyFire, mul = ff.autoStructureMul;
-  const n = Math.max(1, s.shells || s.rockets || 1);
   const dist0 = Math.hypot(aim[0] - u.x, aim[1] - u.y);
   const spread = s.spread || (n > 1 ? (s.splash || 10) * 1.5 : 1.5 + dist0 * 0.004);
   const rocket = !!s.rockets;
@@ -432,12 +723,12 @@ function fireArty(world, u, s, dt) {
 function fireRail(world, u, s, dt) {
   if (!gunReady(world, u, s, dt)) return;
   if (world.t < u.scanT) return;
-  const aim = pickCluster(world, u.x, u.y, 0, s.range);
+  const hw = (s.width || 3) * 0.5 + 0.5, aim = pickRail(world, u.x, u.y, s.range, hw);
   if (!aim) { u.scanT = world.t + 0.5; u.cd = 0; return; }
   let dx = aim[0] - u.x, dy = aim[1] - u.y;
   const d = Math.hypot(dx, dy) || 1;
   dx /= d; dy /= d;
-  const x1 = u.x + dx * s.range, y1 = u.y + dy * s.range, hw = (s.width || 3) * 0.5 + 0.5;
+  const x1 = u.x + dx * s.range, y1 = u.y + dy * s.range;
   const A = world.A, hits = [], seen = new Set(), step = 6;
   for (let k = 0; k * step <= s.range + step; k++) {
     const px = u.x + dx * k * step, py = u.y + dy * k * step;
@@ -619,6 +910,8 @@ export function resetCombatRuntime(world) {
   const C = world.combat;
   C.started = false;
   C.shells.length = 0;
+  C.shellVer++;
+  C.tg = null;
   C.mutants.length = 0;
   C.shotN = 0;
   C.snd = {};

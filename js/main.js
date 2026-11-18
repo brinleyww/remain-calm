@@ -8,6 +8,7 @@ import { ALL_ITEMS, campaignMapKey, getCampaignCity } from './map/campaign.js';
 import { DEFAULTS, makeConfig } from './data/config.js';
 import { h, clear, toast, alertModal, modalOpen, primeAudio, sfx } from './ui/dom.js';
 import { itemName } from './ui/names.js';
+import { initFeedback, openFeedback, attachFeedbackGame, detachFeedbackGame } from './ui/feedback.js';
 import { mapKeyFor, fitLoadout, stageCaps } from './ui/mapinfo.js';
 
 const SCREENS = {
@@ -193,9 +194,11 @@ async function launchNow(opts) {
       onExit: (summary) => endSession(summary),
       openLoadout: (world, done) => openGameLoadout(world, done),
       openSettings: (done) => openGameSettings(done),
+      openFeedback: (done) => openFeedback({ onClose: done }),
     });
     game.session = session;
     await session.start();
+    attachFeedbackGame(session);
   } catch (e) {
     console.error(e);
     const keptScreen = game && game.kept;
@@ -215,6 +218,7 @@ function teardownGame() {
   g.root.remove();
   document.body.classList.remove('in-game');
   if (window.__rc === g.session) window.__rc = undefined;
+  detachFeedbackGame();
   appEl.hidden = false;
   applyDisplaySettings();
 }
@@ -385,4 +389,4 @@ onSettingsChange((s, changed) => { if (!game && changed.some(k => k === 'uiScale
 window.addEventListener('storage', (e) => { if (e.key && e.key.startsWith('remain-calm.') && !game && current && current.name === 'title') show('title'); });
 
 const first = parseHash();
-show(first.name, first.params);
+initFeedback(app, show(first.name, first.params));

@@ -67,68 +67,102 @@ export function beginStage(world, idx) {
   if (world.stage === 0 && world.map.welcome) world.events.emit('log', { msg: world.map.welcome, kind: 'info' });
 }
 
-// Civilians spawn in packs next to buildings, weighted by building population. Independent of placements.
+function zOrder(x, y) {
+  let k = 0;
+  for (let b = 0; b < 12; b++) k += (((x >> b) & 1) + 2 * ((y >> b) & 1)) * 4 ** b;
+  return k;
+}
+
+// Civilians spawn in small groups on the pavement along buildings, weighted by building population, and only on
+// ground joined to the street network (never in a walled-in yard they could not leave). Independent of placements.
 function spawnCivilians(world) {
   const cfg = world.cfg, pc = cfg.population, g = world.grid, mask = world.region.mask;
   const rng = new Rng(hash2(world.seed, 0x71c0 + world.stage));
   let N = Math.round(world.C * pc.scale);
-  const cap = cfg.sim.maxAgents || 90000;
+  const cap = cfg.sim.maxAgents || 250000;
   world.largeMap = N > cap;
   if (N > cap) N = cap;
-  const blds = [], wts = [];
+  if (N <= 0) { world.stats.civStart = 0; return; }
+  const gw = g.gw, gh = g.gh, NC = mask.length, terr = g.terrain;
+  // terrain-only walkability so the crowd does not depend on what the player has built
+  const ok = new Uint8Array(NC);
+  for (let y = 1; y < gh - 1; y++) for (let c = y * gw + 1, e = y * gw + gw - 1; c < e; c++) if (mask[c] === 1 && isWalkTerrain(terr[c])) ok[c] = 1;
+  const comp = new Int32Array(NC), q = new Int32Array(NC), sizes = [0];
+  let big = 0;
+  for (let s = 0; s < NC; s++) {
+    if (!ok[s] || comp[s]) continue;
+    const id = sizes.length;
+    let h = 0, t = 0;
+    q[t++] = s; comp[s] = id;
+    while (h < t) {
+      const c = q[h++];
+      if (ok[c - 1] && !comp[c - 1]) { comp[c - 1] = id; q[t++] = c - 1; }
+      if (ok[c + 1] && !comp[c + 1]) { comp[c + 1] = id; q[t++] = c + 1; }
+      if (ok[c - gw] && !comp[c - gw]) { comp[c - gw] = id; q[t++] = c - gw; }
+      if (ok[c + gw] && !comp[c + gw]) { comp[c + gw] = id; q[t++] = c + gw; }
+    }
+    sizes.push(t);
+    if (t > big) big = t;
+  }
+  const openMin = Math.min(600, big * 0.25), open = new Uint8Array(sizes.length);
+  for (let k = 1; k < sizes.length; k++) open[k] = sizes[k] >= openMin ? 1 : 0;
+  const good = (c) => ok[c] === 1 && open[comp[c]] === 1;
+  const wts = [], dOff = [0], doors = [];
   let total = 0;
   for (const b of world.buildings) {
     const cx = Math.floor(b.cx / g.cell), cy = Math.floor(b.cy / g.cell);
-    if (cx < 0 || cy < 0 || cx >= g.gw || cy >= g.gh || !mask[cy * g.gw + cx]) continue;
+    if (cx < 0 || cy < 0 || cx >= gw || cy >= gh || !mask[cy * gw + cx]) continue;
     const km = pc.kindMul[b.k];
     const w = b.area * pc.perM2 * (km === undefined ? 1 : km);
     if (!(w > 0)) continue;
-    total += w; blds.push(b.idx); wts.push(total);
-  }
-  if (!blds.length || N <= 0) { world.stats.civStart = 0; return; }
-  // terrain-only walkability so the crowd does not depend on what the player has built
-  const walk = (c) => {
-    const X = c % g.gw, Y = (c / g.gw) | 0;
-    return X > 0 && Y > 0 && X < g.gw - 1 && Y < g.gh - 1 && mask[c] === 1 && isWalkTerrain(g.terrain[c]);
-  };
-  const adj = new Map();
-  const doorsOf = (bi) => {
-    let d = adj.get(bi);
-    if (d) return d;
-    const set = new Set();
-    for (const c of g.bInfo[bi].cells) {
-      for (const n of [c - 1, c + 1, c - g.gw, c + g.gw]) if (n >= 0 && n < mask.length && walk(n)) set.add(n);
+    const n0 = doors.length;
+    for (const c of g.bInfo[b.idx].cells) {
+      // a door already listed has its label negated, so good() skips it; the labels are restored below
+      for (const n of [c - 1, c + 1, c - gw, c + gw]) if (n >= 0 && n < NC && good(n)) { doors.push(n); comp[n] = -comp[n]; }
     }
-    d = Int32Array.from([...set].sort((a, z) => a - z));
-    adj.set(bi, d);
-    return d;
-  };
+    for (let k = n0; k < doors.length; k++) comp[doors[k]] = -comp[doors[k]];
+    if (doors.length === n0) continue;
+    total += w; wts.push(total); dOff.push(doors.length);
+  }
+  if (!wts.length) { world.stats.civStart = 0; return; }
   const [pmin, pmax] = pc.packSize;
-  const spread = pc.packSpread;
-  let placed = 0, guard = 0;
-  const A = world.A;
-  while (placed < N && guard++ < N * 4 + 100) {
+  const spread = pc.packSpread, cs = g.cell, W = world.map.w, H = world.map.h;
+  const PX = new Float32Array(N), PY = new Float32Array(N), TM = new Float32Array(N);
+  let placed = 0;
+  while (placed < N) {
     const r = rng.next() * total;
     let lo = 0, hi = wts.length - 1;
     while (lo < hi) { const m = (lo + hi) >> 1; if (wts[m] < r) lo = m + 1; else hi = m; }
-    const doors = doorsOf(blds[lo]);
-    if (!doors.length) continue;
-    const dc = doors[rng.int(0, doors.length - 1)];
-    const sx = (dc % g.gw + 0.5) * g.cell, sy = (((dc / g.gw) | 0) + 0.5) * g.cell;
-    const size = Math.min(N - placed, rng.int(pmin, pmax));
+    const d0 = dOff[lo], nd = dOff[lo + 1] - d0;
+    const dc = doors[d0 + rng.int(0, nd - 1)];
+    const size = Math.min(N - placed, Math.max(1, rng.int(pmin, pmax)));
     for (let k = 0; k < size; k++) {
+      // half the group stands at other doors of the same building, so frontages fill rather than clump
+      const ac = rng.next() < 0.5 ? doors[d0 + rng.int(0, nd - 1)] : dc, sp = ac === dc ? spread : spread * 0.4;
+      const sx = (ac % gw + 0.5) * cs, sy = (((ac / gw) | 0) + 0.5) * cs;
       let px = sx, py = sy;
       for (let tr = 0; tr < 4; tr++) {
-        const qx = sx + rng.range(-spread, spread), qy = sy + rng.range(-spread, spread);
-        const c = Math.floor(qy / g.cell) * g.gw + Math.floor(qx / g.cell);
-        if (qx > 0 && qy > 0 && qx < world.map.w && qy < world.map.h && walk(c)) { px = qx; py = qy; break; }
+        const qx = sx + rng.range(-sp, sp), qy = sy + rng.range(-sp, sp);
+        if (!(qx > 0 && qy > 0 && qx < W && qy < H)) continue;
+        if (good(Math.floor(qy / cs) * gw + Math.floor(qx / cs))) { px = qx; py = qy; break; }
       }
-      const i = spawnAgent(world, CIV, px, py);
-      if (i < 0) { placed = N; break; }
-      A.timer[i] = rng.range(0, 5);
-      A.cd[i] = 0;
+      PX[placed + k] = px; PY[placed + k] = py; TM[placed + k] = rng.range(0, 5);
     }
     placed += size;
+  }
+  // spawn in Z-order of 16 m cells: neighbours sit next to each other in the agent arrays, which keeps the per-tick
+  // grid and hash reads cache-friendly for the whole stage (residents mostly stay near home)
+  const key = new Float64Array(N);
+  let SLOT = 1;
+  while (SLOT <= N) SLOT *= 2;
+  for (let k = 0; k < N; k++) key[k] = zOrder((PX[k] / 16) | 0, (PY[k] / 16) | 0) * SLOT + k;
+  key.sort();
+  const A = world.A;
+  for (let k = 0; k < N; k++) {
+    const j = key[k] % SLOT, i = spawnAgent(world, CIV, PX[j], PY[j]);
+    if (i < 0) break;
+    A.timer[i] = TM[j];
+    A.cd[i] = 0;
   }
   world.stats.civStart = world.counts[CIV];
   world.stats.civAlive = world.counts[CIV];
@@ -138,7 +172,8 @@ export function placementsHash(world) {
   let h = 0x9e3779b9 >>> 0;
   const mix = (v) => { h = hash2(h, Math.round(v * 10) | 0); };
   for (const pl of world.zones.polys) { mix(pl.id); for (const v of pl.p) mix(v); }
-  for (const gt of world.zones.gates) { mix(gt.x); mix(gt.y); }
+  // gates snap and slide along the true wall, so a gate counts by identity and zone, not by its exact spot
+  for (const gt of world.zones.gates) { mix(gt.id); mix(gt.comp); }
   for (const w of world.walls) for (const v of w.p) mix(v);
   for (const c of world.corridors) { mix(c.x0); mix(c.y0); mix(c.x1); mix(c.y1); mix(c.w); }
   for (const ho of world.holds) { mix(ho.x); mix(ho.y); mix(ho.R); }
@@ -258,7 +293,7 @@ function edgeWave(world) {
     if (c < 0) continue;
     const g = world.grid, cx = (c % g.gw + 0.5) * g.cell, cy = (((c / g.gw) | 0) + 0.5) * g.cell;
     if (!siteOk(world, zd, cx, cy, oc.minDistFromZone)) continue;
-    const count = Math.max(1, Math.round((oc.edgeWaveZombies || 60) * (+oc.edgeWaves || 1) * (oc.zombieScaleWithPop ? cfg.population.scale : 1)));
+    const count = Math.max(1, Math.round((oc.edgeWaveZombies || 21) * (+oc.edgeWaves || 1) * (oc.zombieScaleWithPop ? cfg.population.scale : 1)));
     placeHorde(world, rng, zd, cx, cy, 30, count, 0);
     world.events.emit('outbreak', { sites: [[cx, cy]], edge: true });
     world.events.emit('log', { msg: 'HORDE AT THE CITY LIMITS', kind: 'alert', x: cx, y: cy });
@@ -281,6 +316,8 @@ export function startBattle(world) {
   rebuildHash(world);
   const ob = outbreak(world, false);
   rebuildHash(world);
+  // a swim field left from an earlier attempt would make Retry differ from the first run
+  world.nav.swim = null; world.nav.swimmers = 0;
   computeFieldsNow(world);
   const oc = world.cfg.outbreak;
   if (world.stage > 0 && world.rng.next() < oc.secondaryChancePerLevel * world.stage) {

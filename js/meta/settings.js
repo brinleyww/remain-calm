@@ -46,7 +46,7 @@ export const DEFAULT_KEYS = {
 };
 
 export const PALETTE_CHOICES = ['auto', 'paper', 'blueprint', 'night'];
-export const POP_SCALE_RANGE = [0.05, 1];
+export const POP_SCALE_RANGE = [0.05, 2];
 export const UI_SCALE_RANGE = [0.8, 1.4];
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -54,7 +54,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   volume: 0.7,        // master, 0..1
   sfxVolume: 1,       // game effects relative to master
   uiSounds: true,     // typewriter clacks in menus
-  popScale: 0.35,     // feeds config population.scale
+  popScale: 1,        // feeds config population.scale
+  popV: 2,            // settings saved before v2 kept the old 0.35 default; see migrate()
   autoPauseOnOutbreak: true,
   showTips: true,
   uiScale: 1,
@@ -90,7 +91,13 @@ function sanitize(raw) {
 }
 
 function load() {
-  try { return sanitize(JSON.parse(localStorage.getItem(KEY) || 'null')); } catch (e) { return sanitize(null); }
+  try { return sanitize(migrate(JSON.parse(localStorage.getItem(KEY) || 'null'))); } catch (e) { return sanitize(null); }
+}
+
+// The default population scale went from 0.35 to 1: a saved value still at the old default follows it.
+function migrate(raw) {
+  if (raw && typeof raw === 'object' && !(raw.popV >= 2) && Math.abs(+raw.popScale - 0.35) < 1e-6) delete raw.popScale;
+  return raw;
 }
 
 function save() {

@@ -1,54 +1,55 @@
-// Real-place import: Nominatim search, one Overpass request, OSM JSON -> MapData.
-// Etiquette: only user-triggered, one request at a time, timeouts, attribution shown wherever geo is set.
-import { polyArea, polyCentroid, polyBBox, pointInPoly, simplify, clamp, rasterPoly } from '../util/geom.js';
+// Real-place import: Nominatim search, a lean tiled Overpass fetch (see osmnet.js), a local cache, files, OSM -> MapData.
+// Etiquette: only user-triggered, at most 2 requests in flight, timeouts, attribution shown wherever geo is set.
+import { polyArea, polySignedArea, polyCentroid, polyBBox, pointInPoly, simplify, clamp, rasterPoly, rasterPolyline } from '../util/geom.js';
 import { hashStr } from '../util/rng.js';
-import { FORMAT, VERSION, normalizeMap, makeStages, mergeHoles, clipPolyRect, clipLineRect, mapStats } from './format.js';
+import { FORMAT, VERSION, normalizeMap, makeStages, mergeHoles, reversePoly, clipPolyRect, clipLineRect, mapStats } from './format.js';
+import { OVERPASS_MIRRORS, NET, makeSlots, fetchQuery, hostOf, cancelled } from './osmnet.js';
+import { cacheKey, cacheGet, cachePut } from './osmcache.js';
+import { readOsmFile } from './osmfile.js';
 
+export { OVERPASS_MIRRORS, NET, mirrorHealth, resetMirrorHealth, rankMirrors } from './osmnet.js';
+export const OVERPASS_ENDPOINTS = OVERPASS_MIRRORS;
 export const OSM_ATTRIBUTION = '© OpenStreetMap contributors';
 export const OSM_ATTRIBUTION_URL = 'https://www.openstreetmap.org/copyright';
 export const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
-export const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-];
-export const IMPORT_SIZES = [0.5, 1, 1.5, 2, 3, 4, 5];
+export const IMPORT_SIZES = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4];
+export const IMPORT_RANGE = { min: 0.5, max: 4, step: 0.5 };
+export const TILE_KM = 2;
 export const HUGE_LIMITS = { buildings: 30000, roads: 16000, areaKm2: 9.5 };
 
 const R_EARTH = 6371008.8;
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+export const snapSize = s => clamp(Math.round((+s || 2) * 2) / 2, IMPORT_RANGE.min, IMPORT_RANGE.max);
+export const roundCoord = v => Math.round(+v * 1e4) / 1e4;
 
-// ---------------------------------------------------------------- network
+// ---------------------------------------------------------------- search
 
 let lastSearch = 0;
-let busy = null;
-
-function linkSignals(signal, ms) {
-  const ctl = new AbortController();
-  const timer = ms ? setTimeout(() => ctl.abort(new Error('timeout')), ms) : null;
-  const onAbort = () => ctl.abort(signal.reason || new Error('aborted'));
-  if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
-  return { signal: ctl.signal, done: () => { if (timer) clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); } };
-}
 const sleep = (ms, signal) => new Promise((res, rej) => {
   const t = setTimeout(res, ms);
   if (signal) signal.addEventListener('abort', () => { clearTimeout(t); rej(new Error('aborted')); }, { once: true });
 });
 
-// Call only on an explicit submit. Results: [{ name, label, lat, lon, type, bbox }]
-export async function searchPlaces(query, { signal, lang } = {}) {
+// Call only on an explicit submit (Nominatim: max 1 request per second, no search-as-you-type).
+// Results: [{ name, label, lat, lon, type, category, bbox }]
+export async function searchPlaces(query, { signal, lang, fetchImpl = fetch } = {}) {
   const q = String(query || '').trim().slice(0, 200);
   if (!q) return [];
   const wait = lastSearch + 1100 - Date.now();
   if (wait > 0) await sleep(wait, signal);
   lastSearch = Date.now();
   const url = `${NOMINATIM_URL}?format=jsonv2&limit=8&q=${encodeURIComponent(q)}`;
-  const link = linkSignals(signal, 20000);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  const onAbort = () => ctl.abort();
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
   let res;
   try {
-    res = await fetch(url, { signal: link.signal, headers: { Accept: 'application/json', ...(lang ? { 'Accept-Language': lang } : {}) } });
+    res = await fetchImpl(url, { signal: ctl.signal, headers: lang ? { 'Accept-Language': lang } : {} });
   } catch (e) {
-    throw new Error(signal && signal.aborted ? 'Search cancelled' : 'Place search failed (network or timeout)');
-  } finally { link.done(); }
+    throw new Error(signal && signal.aborted ? 'Search cancelled' : 'Place search failed: the search service did not answer. Check the connection and try again.');
+  } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); }
+  if (res.status === 429) throw new Error('Place search is busy (HTTP 429). Wait a few seconds and search again.');
   if (!res.ok) throw new Error(`Place search failed (HTTP ${res.status})`);
   const arr = await res.json();
   return (Array.isArray(arr) ? arr : []).map(r => ({
@@ -59,6 +60,8 @@ export async function searchPlaces(query, { signal, lang } = {}) {
   })).filter(r => Number.isFinite(r.lat) && Number.isFinite(r.lon));
 }
 
+// ---------------------------------------------------------------- query
+
 export function areaBBox(lat, lon, sizeKm) {
   const half = (sizeKm * 1000) / 2;
   const dLat = (half / R_EARTH) * (180 / Math.PI);
@@ -66,106 +69,205 @@ export function areaBBox(lat, lon, sizeKm) {
   return { s: lat - dLat, w: lon - dLon, n: lat + dLat, e: lon + dLon };
 }
 
-export function overpassQuery(lat, lon, sizeKm, timeoutSec = 90) {
-  const b = areaBBox(lat, lon, sizeKm);
-  const bb = [b.s, b.w, b.n, b.e].map(v => v.toFixed(6)).join(',');
-  const amen = 'police|fire_station|townhall|courthouse|library|bank|hospital|clinic|school|college|university|bus_station|ferry_terminal|fuel|marketplace|community_centre|place_of_worship';
-  return `[out:json][timeout:${timeoutSec}][maxsize:536870912];
+// n x n tiles of at most tileKm on a side, row by row from the south-west.
+export function planTiles(lat, lon, sizeKm, tileKm = TILE_KM) {
+  const n = Math.max(1, Math.ceil(sizeKm / tileKm - 1e-9));
+  const b = areaBBox(lat, lon, sizeKm), out = [];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    out.push({ s: b.s + (b.n - b.s) * j / n, n: b.s + (b.n - b.s) * (j + 1) / n, w: b.w + (b.e - b.w) * i / n, e: b.w + (b.e - b.w) * (i + 1) / n });
+  }
+  return out;
+}
+
+const AMEN = 'police|fire_station|townhall|courthouse|library|bank|hospital|clinic|school|college|university|bus_station|ferry_terminal|fuel|marketplace|community_centre|place_of_worship';
+const GREEN_LU = 'grass|forest|meadow|village_green|recreation_ground|cemetery|allotments|orchard';
+const LEISURE = 'park|garden|playground|pitch|golf_course|recreation_ground|common|dog_park|stadium';
+const NATURAL = 'water|wood|scrub|grassland|heath|wetland';
+const HW_SKIP = 'proposed|construction|abandoned|disused|platform|raceway|bus_stop|elevator|services|rest_area|escape|emergency_bay|razed|no|traffic_island|corridor|bridleway';
+
+// Only what osmToMap reads. Ways: tags + geometry (no node ids). Area relations: geometry cropped to the
+// square plus a margin, so a huge lake or forest costs only its local outline. POI nodes: plain.
+export function overpassQuery(lat, lon, sizeKm, timeoutSec = 60, tile = null) {
+  const f = b => [b.s, b.w, b.n, b.e].map(v => v.toFixed(6)).join(',');
+  const box = f(tile || areaBBox(lat, lon, sizeKm)), crop = f(areaBBox(lat, lon, sizeKm * 1.08 + 0.3));
+  return `[out:json][timeout:${timeoutSec}][maxsize:134217728][bbox:${box}];
 (
-  way["highway"](${bb});
-  way["railway"~"^(rail|light_rail|narrow_gauge|subway)$"](${bb});
-  way["building"](${bb});
-  relation["building"](${bb});
-  way["natural"~"^(water|coastline|wood|scrub|grassland|heath|wetland)$"](${bb});
-  relation["natural"~"^(water|wood|scrub|grassland|heath|wetland)$"](${bb});
-  way["waterway"~"^(riverbank|river|canal|stream|dock)$"](${bb});
-  relation["waterway"="riverbank"](${bb});
-  way["water"](${bb});
-  relation["water"](${bb});
-  way["landuse"~"^(reservoir|basin|grass|forest|meadow|village_green|recreation_ground|cemetery|allotments|orchard|military|industrial)$"](${bb});
-  relation["landuse"~"^(reservoir|basin|grass|forest|meadow|recreation_ground|cemetery|military|industrial)$"](${bb});
-  way["leisure"~"^(park|garden|playground|pitch|golf_course|recreation_ground|common|dog_park|nature_reserve|stadium)$"](${bb});
-  relation["leisure"~"^(park|garden|golf_course|nature_reserve|stadium)$"](${bb});
-  way["amenity"~"^(${amen})$"](${bb});
-  node["amenity"~"^(${amen})$"](${bb});
-  node["shop"~"^(mall|department_store|supermarket|hardware|doityourself|sports|outdoor|hunting|weapons)$"](${bb});
-  node["tourism"="hotel"](${bb});
-  node["railway"="station"](${bb});
-  way["man_made"~"^(gasometer|storage_tank|works)$"](${bb});
-  way["power"~"^(plant|substation)$"](${bb});
-  way["military"](${bb});
+way["highway"]["highway"!~"^(${HW_SKIP})$"]["footway"!~"^(sidewalk|crossing|traffic_island)$"]["area"!="yes"];
+way["railway"~"^(rail|light_rail|narrow_gauge|subway)$"];
+way["building"]["building"!="no"];
+way["natural"~"^(${NATURAL}|coastline)$"];
+way["waterway"~"^(riverbank|river|canal|dock)$"];
+way["waterway"="stream"]["width"];
+way["water"];
+way["landuse"~"^(reservoir|basin|military|industrial|${GREEN_LU})$"];
+way["leisure"~"^(${LEISURE})$"];
+way["amenity"~"^(${AMEN})$"];
+way["man_made"~"^(gasometer|storage_tank|works)$"];
+way["power"~"^(plant|substation)$"];
+way["military"];
 );
-out geom qt;`;
+out tags geom qt;
+(
+relation["type"="multipolygon"]["building"];
+relation["type"="multipolygon"]["natural"~"^(${NATURAL})$"];
+relation["type"="multipolygon"]["waterway"="riverbank"];
+relation["type"="multipolygon"]["water"];
+relation["type"="multipolygon"]["landuse"~"^(reservoir|basin|military|industrial|${GREEN_LU})$"];
+relation["type"="multipolygon"]["leisure"~"^(${LEISURE})$"];
+relation["type"="multipolygon"]["amenity"~"^(${AMEN})$"];
+);
+out geom(${crop}) qt;
+(
+node["amenity"~"^(${AMEN})$"];
+node["shop"~"^(mall|department_store|supermarket|hardware|doityourself|sports|outdoor|hunting|weapons)$"];
+node["tourism"="hotel"];
+node["railway"="station"];
+);
+out qt;`;
 }
 
-async function overpassOnce(endpoint, query, { signal, onProgress, timeoutMs }) {
-  const link = linkSignals(signal, timeoutMs);
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST', signal: link.signal,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', Accept: 'application/json' },
-      body: 'data=' + encodeURIComponent(query),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}${res.status === 429 ? ' (server busy)' : res.status === 504 ? ' (server timeout)' : res.status === 406 || res.status === 403 ? ' (request refused)' : ''}`);
-    let text;
-    if (res.body && res.body.getReader) {
-      const reader = res.body.getReader(), dec = new TextDecoder();
-      const parts = [];
-      let bytes = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.length;
-        parts.push(dec.decode(value, { stream: true }));
-        if (onProgress) onProgress({ phase: 'download', bytes, endpoint });
-      }
-      parts.push(dec.decode());
-      text = parts.join('');
-    } else text = await res.text();
-    if (onProgress) onProgress({ phase: 'parse', bytes: text.length, endpoint });
-    const data = JSON.parse(text);
-    if (!data || !Array.isArray(data.elements)) throw new Error('unexpected response');
-    if (data.remark && /error|timed out|out of memory/i.test(data.remark) && data.elements.length === 0) throw new Error(data.remark);
-    return data;
-  } finally { link.done(); }
+// ---------------------------------------------------------------- fetch
+
+let busy = false;
+const tileMemo = new Map(); // query -> result, so Retry only fetches what failed
+
+function linked(signal) {
+  const ctl = new AbortController();
+  const on = () => ctl.abort();
+  if (signal) { if (signal.aborted) ctl.abort(); else signal.addEventListener('abort', on, { once: true }); }
+  return { ctl, done: () => signal && signal.removeEventListener('abort', on) };
 }
 
-// One Overpass request; mirrors are tried only when the previous endpoint failed.
-export async function fetchArea({ lat, lon, sizeKm = 2, onProgress, signal, timeoutSec = 90 } = {}) {
+// Tiles run one at a time until a mirror has proven itself, then two at a time. Elements are de-duplicated.
+export async function fetchArea({ lat, lon, sizeKm = 2, onProgress, signal, fetchImpl = fetch, tileKm = TILE_KM, timeoutSec = 60 } = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('No location chosen');
   sizeKm = clamp(+sizeKm || 2, 0.25, 6);
   if (busy) throw new Error('An import is already running');
-  const query = overpassQuery(lat, lon, sizeKm, timeoutSec);
-  let lastErr = null;
   busy = true;
+  const t0 = now();
+  const link = linked(signal);
   try {
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      if (signal && signal.aborted) throw new Error('Import cancelled');
-      if (onProgress) onProgress({ phase: 'request', endpoint, bytes: 0 });
-      try {
-        return await overpassOnce(endpoint, query, { signal, onProgress, timeoutMs: (timeoutSec + 30) * 1000 });
-      } catch (e) {
-        if (signal && signal.aborted) throw new Error('Import cancelled');
-        lastErr = e;
-        if (onProgress) onProgress({ phase: 'retry', endpoint, error: String(e.message || e) });
+    const tiles = planTiles(lat, lon, sizeKm, tileKm);
+    const queries = tiles.map(t => overpassQuery(lat, lon, sizeKm, timeoutSec, tiles.length > 1 ? t : null));
+    const slots = makeSlots(NET.inFlight);
+    const got = new Array(tiles.length).fill(null), bytes = new Array(tiles.length).fill(0);
+    const emit = (p) => {
+      if (!onProgress) return;
+      let b = 0, done = 0;
+      for (let i = 0; i < tiles.length; i++) { b += bytes[i]; if (got[i]) done++; }
+      onProgress({ ...p, tiles: tiles.length, tilesDone: done, totalBytes: b, ms: Math.round(now() - t0) });
+    };
+    let next = 0, proven = false;
+    const runners = [];
+    const runner = async () => {
+      while (next < tiles.length) {
+        const i = next++;
+        if (tileMemo.has(queries[i])) { got[i] = tileMemo.get(queries[i]); bytes[i] = got[i].bytes; emit({ phase: 'tile', tile: i, endpoint: got[i].url }); continue; }
+        const r = await fetchQuery(queries[i], {
+          signal: link.ctl.signal, slots, fetchImpl,
+          onEvent: (e) => {
+            if (e.phase === 'download') { bytes[i] = e.bytes; if (!proven) { proven = true; spawn(); } }
+            emit({ ...e, tile: i });
+          },
+        });
+        got[i] = r;
+        bytes[i] = r.bytes;
+        tileMemo.set(queries[i], r);
+        while (tileMemo.size > 8) tileMemo.delete(tileMemo.keys().next().value);
+        emit({ phase: 'tile', tile: i, endpoint: r.url });
+        proven = true;
+        spawn();
+      }
+    };
+    const spawn = () => {
+      if (runners.length >= NET.inFlight || next >= tiles.length) return;
+      runners.push(runner().catch((e) => { if (!failed && !(e && e.cancelled)) failed = e; link.ctl.abort(); throw e; }));
+    };
+    // the first real failure is reported, not the cancel it caused in the other runner
+    let failed = null;
+    spawn();
+    for (let k = 0; k < runners.length; k++) {
+      try { await runners[k]; } catch (e) {
+        await Promise.allSettled(runners);
+        if (signal && signal.aborted) throw cancelled();
+        throw failed || e;
       }
     }
-  } finally { busy = null; }
-  throw new Error('Map data download failed: ' + (lastErr ? lastErr.message : 'no server answered'));
+    if (signal && signal.aborted) throw cancelled();
+    const seen = new Set(), elements = [];
+    for (const r of got) {
+      for (const e of r.data.elements) {
+        const k = e.type[0] + e.id;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        if (e.type === 'way') delete e.bounds;
+        elements.push(e);
+      }
+    }
+    for (const q of queries) tileMemo.delete(q);
+    return {
+      elements, osm3s: got[0].data.osm3s || null,
+      info: { tiles: tiles.length, bytes: bytes.reduce((a, b) => a + b, 0), ms: Math.round(now() - t0), mirrors: [...new Set(got.map(r => hostOf(r.url)))] },
+    };
+  } finally { busy = false; link.done(); }
 }
 
-export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onProgress, signal } = {}) {
-  const raw = await fetchArea({ lat, lon, sizeKm, onProgress, signal });
-  if (onProgress) onProgress({ phase: 'convert' });
-  await new Promise(r => setTimeout(r, 0));
-  const map = osmToMap(raw, { lat, lon, sizeKm, name, stages });
-  const stats = mapStats(map);
+// Square of a file's data: centre of its bounds, side = the shorter edge, in 0.5 km steps up to 4 km.
+export function fileSquare(bounds) {
+  if (!bounds) throw new Error('The file has no location data');
+  const lat = (bounds.s + bounds.n) / 2, lon = (bounds.w + bounds.e) / 2;
+  const ky = R_EARTH * Math.PI / 180, kx = ky * Math.cos(lat * Math.PI / 180);
+  const wKm = Math.abs(bounds.e - bounds.w) * kx / 1000, hKm = Math.abs(bounds.n - bounds.s) * ky / 1000;
+  const side = Math.min(wKm, hKm);
+  return { lat, lon, maxKm: clamp(Math.floor(side * 2 + 0.05) / 2, IMPORT_RANGE.min, IMPORT_RANGE.max), sideKm: side };
+}
+
+// -> { map, huge, warnings, stats, source: 'network'|'cache'|'file', info, lat, lon, sizeKm }
+export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onProgress, signal, fetchImpl, file, text, cache = true } = {}) {
+  const t0 = now();
+  const emit = p => { if (onProgress) onProgress(p); };
+  let raw = null, source = 'network', info = {};
   const warnings = [];
+  if (file || text != null) {
+    emit({ phase: 'read' });
+    const parsed = await readOsmFile(file || text);
+    const sq = fileSquare(parsed.bounds);
+    lat = sq.lat; lon = sq.lon;
+    sizeKm = Math.min(snapSize(sizeKm || sq.maxKm), sq.maxKm);
+    if (sq.sideKm < IMPORT_RANGE.min * 0.9) warnings.push(`The file covers only ${Math.round(sq.sideKm * 1000)} m; the edges of the sheet will be empty.`);
+    else if (sq.sideKm > sizeKm + 0.1) warnings.push(`The file covers ${sq.sideKm.toFixed(1)} km; the central ${sizeKm} km square is used.`);
+    raw = parsed;
+    source = 'file';
+    if (!name && file && file.name) name = String(file.name).replace(/\.(osm|xml|json)$/i, '').replace(/[_-]+/g, ' ').trim();
+    info = { format: parsed.format, elements: parsed.elements.length };
+  } else {
+    if (!Number.isFinite(+lat) || !Number.isFinite(+lon)) throw new Error('No location chosen');
+    lat = roundCoord(lat); lon = roundCoord(lon); sizeKm = snapSize(sizeKm);
+    const key = cacheKey(lat, lon, sizeKm);
+    if (cache) {
+      try { raw = await cacheGet(key); } catch (e) { raw = null; }
+      if (raw) { source = 'cache'; emit({ phase: 'cache' }); info = { elements: raw.elements.length }; }
+    }
+    if (!raw) {
+      raw = await fetchArea({ lat, lon, sizeKm, onProgress, signal, fetchImpl: fetchImpl || fetch });
+      info = { ...raw.info, elements: raw.elements.length };
+      if (cache) { try { await cachePut(key, raw, { name, lat, lon, sizeKm, bytes: raw.info.bytes }); } catch (e) { /* best effort */ } }
+    }
+  }
+  if (signal && signal.aborted) throw cancelled();
+  info.fetchMs = Math.round(now() - t0);
+  if (raw.osm3s && raw.osm3s.timestamp_osm_base) info.stamp = raw.osm3s.timestamp_osm_base;
+  emit({ phase: 'convert' });
+  await new Promise(r => setTimeout(r, 0));
+  const t1 = now();
+  const map = osmToMap(raw, { lat, lon, sizeKm, name, stages });
+  info.convertMs = Math.round(now() - t1);
+  const stats = mapStats(map);
   const huge = isHugeMap(map);
   if (huge) warnings.push('Large map: expect slower simulation on modest computers.');
   if (!map.buildings.length) warnings.push('No buildings found in this area.');
-  if (onProgress) onProgress({ phase: 'done' });
-  return { map, huge, warnings, stats };
+  emit({ phase: 'done' });
+  return { map, huge, warnings, stats, source, info, lat, lon, sizeKm };
 }
 
 export function isHugeMap(map) {
@@ -175,16 +277,17 @@ export function isHugeMap(map) {
 // ---------------------------------------------------------------- tag classification
 
 const SKIP_HIGHWAY = new Set(['proposed', 'construction', 'abandoned', 'disused', 'platform', 'raceway', 'bus_stop', 'elevator', 'services',
-  'rest_area', 'escape', 'emergency_bay', 'razed', 'no', 'traffic_island']);
+  'rest_area', 'escape', 'emergency_bay', 'razed', 'no', 'traffic_island', 'corridor']);
+const FOOTWAY_SKIP = new Set(['sidewalk', 'crossing', 'traffic_island']);
 const ROAD_SPEC = {
   motorway: ['major', 20], trunk: ['major', 17], primary: ['major', 14], secondary: ['major', 12], tertiary: ['major', 10],
   motorway_link: ['major', 9], trunk_link: ['major', 9], primary_link: ['major', 8], secondary_link: ['major', 8], tertiary_link: ['minor', 7],
   unclassified: ['minor', 7], residential: ['minor', 7], living_street: ['minor', 6], road: ['minor', 7], busway: ['minor', 7],
   service: ['minor', 5], pedestrian: ['path', 5], track: ['path', 3.5], footway: ['path', 2.5], path: ['path', 2.5],
-  cycleway: ['path', 2.5], bridleway: ['path', 2.5], steps: ['path', 2.5], corridor: ['path', 2],
+  cycleway: ['path', 2.5], bridleway: ['path', 2.5], steps: ['path', 2.5],
 };
 const PARK_TAGS = {
-  leisure: new Set(['park', 'garden', 'playground', 'pitch', 'golf_course', 'recreation_ground', 'common', 'dog_park', 'nature_reserve']),
+  leisure: new Set(['park', 'garden', 'playground', 'pitch', 'golf_course', 'recreation_ground', 'common', 'dog_park']),
   landuse: new Set(['grass', 'forest', 'meadow', 'village_green', 'recreation_ground', 'cemetery', 'allotments', 'orchard', 'greenfield']),
   natural: new Set(['wood', 'scrub', 'grassland', 'heath', 'wetland']),
 };
@@ -352,35 +455,44 @@ export function osmToMap(raw, opts = {}) {
     else if (e.type === 'way') ways.set(e.id, e);
     else if (e.type === 'relation') rels.push(e);
   }
-  // way geometry as chain of [key, x, y]
-  const wayChain = (w) => {
-    if (w._chain !== undefined) return w._chain;
-    let c = null;
-    if (Array.isArray(w.geometry) && w.geometry.length) {
-      c = [];
-      for (let i = 0; i < w.geometry.length; i++) {
-        const g = w.geometry[i];
-        if (!g) continue;
-        const id = w.nodes ? w.nodes[i] : null;
-        c.push([id != null ? 'n' + id : g.lat.toFixed(7) + ',' + g.lon.toFixed(7), px(g.lon), py(g.lat)]);
-      }
-    } else if (Array.isArray(w.nodes)) {
-      c = [];
-      for (const id of w.nodes) { const n = nodes.get(id); if (n) c.push(['n' + id, px(n.lon), py(n.lat)]); }
+  // geometry as chains of [key, x, y]; a cropped geometry (nulls outside the crop box) splits into pieces
+  const gkey = g => g.lat.toFixed(7) + ',' + g.lon.toFixed(7);
+  const geomChains = (geom, ids) => {
+    const out = [];
+    let c = [];
+    for (let i = 0; i < geom.length; i++) {
+      const g = geom[i];
+      if (!g || !Number.isFinite(g.lat)) { if (c.length >= 2) out.push(c); c = []; continue; }
+      const id = ids ? ids[i] : null;
+      c.push([id != null ? 'n' + id : gkey(g), px(g.lon), py(g.lat)]);
     }
-    w._chain = c && c.length >= 2 ? c : null;
-    return w._chain;
+    if (c.length >= 2) out.push(c);
+    return out;
   };
-  const memberChain = (m) => {
-    if (Array.isArray(m.geometry) && m.geometry.length) {
-      return m.geometry.filter(Boolean).map(g => [g.lat.toFixed(7) + ',' + g.lon.toFixed(7), px(g.lon), py(g.lat)]);
+  const wayChains = (w) => {
+    if (w._chains !== undefined) return w._chains;
+    let cs = [];
+    if (Array.isArray(w.geometry) && w.geometry.length) cs = geomChains(w.geometry, w.nodes);
+    else if (Array.isArray(w.nodes)) {
+      let c = [];
+      for (const id of w.nodes) {
+        const n = nodes.get(id);
+        if (n) c.push(['n' + id, px(n.lon), py(n.lat)]);
+        else { if (c.length >= 2) cs.push(c); c = []; }
+      }
+      if (c.length >= 2) cs.push(c);
     }
+    w._chains = cs;
+    return cs;
+  };
+  const memberChains = (m) => {
+    if (Array.isArray(m.geometry) && m.geometry.length) return geomChains(m.geometry, null);
     const w = ways.get(m.ref);
-    if (!w) return null;
-    return wayChain(w);
+    return w ? wayChains(w) : [];
   };
 
   const roads = [], waterPolys = [], parkPolys = [], bldgs = [], sites = [], riverLines = [], coastChains = [], pois = [];
+  const openAreas = []; // area relations cut by the crop box or by a partial export: sides decided later
   const usedAsMember = new Set();
 
   const addArea = (outerRings, innerRings, tags, id) => {
@@ -405,56 +517,75 @@ export function osmToMap(raw, opts = {}) {
     const t = r.tags || {};
     if (t.type !== 'multipolygon' && t.type !== 'boundary') continue;
     const outer = [], inner = [];
-    let tags = t;
+    let tags = t, inherited = false;
     for (const m of r.members || []) {
       if (m.type !== 'way') continue;
-      const c = memberChain(m);
-      if (!c) continue;
-      (m.role === 'inner' ? inner : outer).push(c);
+      for (const c of memberChains(m)) (m.role === 'inner' ? inner : outer).push(c);
       usedAsMember.add(m.ref);
     }
     if (Object.keys(t).filter(k => k !== 'type').length === 0) {
       const w = ways.get((r.members || []).find(m => m.role !== 'inner')?.ref);
-      if (w && w.tags) tags = w.tags;
+      if (w && w.tags) { tags = w.tags; inherited = true; }
     }
-    const close = list => joinChains(list).map(c => {
-      if (!isClosed(c)) { const a = c[0], b = c[c.length - 1]; if (Math.hypot(a[1] - b[1], a[2] - b[2]) > 50) return null; }
-      return ring(c);
-    }).filter(Boolean);
-    addArea(close(outer), close(inner), tags, 'r' + r.id);
+    if (inherited && tags.building) continue; // old-style: the tagged outer way is drawn on its own
+    const closed = [], open = [];
+    const close = (list, keepOpen) => {
+      const rings = [];
+      for (const c of joinChains(list)) {
+        if (!isClosed(c)) {
+          const a = c[0], b = c[c.length - 1];
+          if (Math.hypot(a[1] - b[1], a[2] - b[2]) > 50) { if (keepOpen) open.push(c); continue; }
+        }
+        rings.push(ring(c));
+      }
+      return rings;
+    };
+    const kind = isWaterArea(tags) ? 'water' : isPark(tags) ? 'park' : null;
+    const outerRings = close(outer, !!kind), innerRings = close(inner, !!kind);
+    closed.push(...outerRings);
+    addArea(closed, innerRings, tags, 'r' + r.id);
+    if (kind && open.length) {
+      let hint = null;
+      const bd = r.bounds;
+      if (bd && Number.isFinite(+bd.minlat)) hint = [px((+bd.minlon + +bd.maxlon) / 2), py((+bd.minlat + +bd.maxlat) / 2)];
+      openAreas.push({ kind, chains: open, holes: innerRings, hint });
+    }
   }
 
   for (const w of ways.values()) {
     const t = w.tags || {};
-    const c = wayChain(w);
-    if (!c) continue;
-    if (t.highway && !SKIP_HIGHWAY.has(t.highway) && t.area !== 'yes') {
-      if (t.tunnel && t.tunnel !== 'no' && t.tunnel !== 'building_passage') continue;
-      if (num(t.layer) < 0 && !t.bridge) continue;
+    const cs = wayChains(w);
+    if (!cs.length) continue;
+    for (const c of cs) addWayPiece(w, t, c, cs.length === 1);
+  }
+  function addWayPiece(w, t, c, whole) {
+    if (t.highway && !SKIP_HIGHWAY.has(t.highway) && t.area !== 'yes' && !FOOTWAY_SKIP.has(t.footway)) {
+      if (t.tunnel && t.tunnel !== 'no' && t.tunnel !== 'building_passage') return;
+      if (num(t.layer) < 0 && !t.bridge) return;
       const spec = ROAD_SPEC[t.highway];
-      if (!spec) continue;
+      if (!spec) return;
       let [k, wid] = spec;
       if (t.highway === 'service' && (t.service === 'parking_aisle' || t.service === 'driveway')) wid = 3.5;
       const tw = num(t.width);
       if (tw > 1.5 && tw < 50) wid = tw;
       roads.push({ p: flat(c), w: wid, k, name: t.name, bridge: !!(t.bridge && !BRIDGE_NO.has(t.bridge)) });
-      continue;
+      return;
     }
     if (t.railway) {
-      if (t.tunnel && t.tunnel !== 'no') continue;
-      if (t.railway === 'subway' && !(t.bridge && !BRIDGE_NO.has(t.bridge)) && t.tunnel !== 'no' && !(num(t.layer) > 0)) continue;
+      if (t.tunnel && t.tunnel !== 'no') return;
+      if (t.railway === 'subway' && !(t.bridge && !BRIDGE_NO.has(t.bridge)) && t.tunnel !== 'no' && !(num(t.layer) > 0)) return;
       if (/^(rail|light_rail|narrow_gauge|subway)$/.test(t.railway)) roads.push({ p: flat(c), w: num(t.gauge) > 0 && t.railway === 'narrow_gauge' ? 4 : 6, k: 'rail' });
-      continue;
+      return;
     }
-    if (t.natural === 'coastline') { coastChains.push(c); continue; }
+    if (t.natural === 'coastline') { coastChains.push(c); return; }
     if ((t.waterway === 'river' || t.waterway === 'canal' || t.waterway === 'stream') && !(t.tunnel && t.tunnel !== 'no')) {
       let wd = num(t.width);
       if (!(wd > 0)) wd = t.waterway === 'river' ? 18 : t.waterway === 'canal' ? 10 : 0;
       if (wd >= 3) riverLines.push({ p: flat(c), hw: Math.min(wd, 400) / 2 });
-      continue;
+      return;
     }
-    if (isClosed(c) && !usedAsMember.has(w.id)) addArea([ring(c)], [], t, 'w' + w.id);
-    else if (isClosed(c) && t.building) addArea([ring(c)], [], t, 'w' + w.id);
+    if (!whole || !isClosed(c)) return;
+    if (!usedAsMember.has(w.id) || t.building) addArea([ring(c)], [], t, 'w' + w.id);
   }
   for (const n of nodes.values()) {
     if (!n.tags) continue;
@@ -465,6 +596,9 @@ export function osmToMap(raw, opts = {}) {
   // coastline -> sea polygons (water on the right-hand side of the way direction)
   const sea = coastToWater(coastChains, W, H);
   for (const s of sea) waterPolys.push(s);
+  const reopened = closeOpenAreas(openAreas, bldgs, roads, W, H);
+  waterPolys.push(...reopened.water);
+  parkPolys.push(...reopened.park);
 
   // rivers drawn only as lines: buffer the parts not already covered by a water area
   const wbbs = waterPolys.map(polyBBox), nWater = waterPolys.length;
@@ -482,10 +616,24 @@ export function osmToMap(raw, opts = {}) {
     flush();
   }
 
-  // final water / parks clipped to the square
-  const water = [], parks = [];
-  for (const p of waterPolys) { const q = clipPolyRect(simplify(p, 0.8), 0, 0, W, H); if (q.length >= 6 && polyArea(q) > 20) water.push({ p: q }); }
-  for (const p of parkPolys) { const q = clipPolyRect(simplify(p, 0.8), 0, 0, W, H); if (q.length >= 6 && polyArea(q) > 30) parks.push({ p: q }); }
+  // final water / parks clipped to the square, one winding (a coastline sea and a tidal creek's own area
+  // often coincide; opposite windings would cancel out when a renderer fills them as one path), no duplicates
+  const finish = (polys, minArea) => {
+    const out = [], seen = new Set();
+    for (const p of polys) {
+      let q = clipPolyRect(simplify(p, 0.8), 0, 0, W, H);
+      if (q.length < 6) continue;
+      const a = polySignedArea(q);
+      if (Math.abs(a) <= minArea) continue;
+      if (a < 0) q = reversePoly(q);
+      const bb = polyBBox(q), key = bb.map(v => Math.round(v / 2)).join(',') + ':' + Math.round(Math.abs(a) / 50);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ p: q });
+    }
+    return out;
+  };
+  const water = finish(waterPolys, 20), parks = finish(parkPolys, 30);
 
   // water raster (4 m) for bridge tests and stage weights
   const cell = 4, gw = Math.ceil(W / cell), gh = Math.ceil(H / cell);
@@ -592,47 +740,55 @@ export function osmToMap(raw, opts = {}) {
   });
 }
 
-// Coastline chains -> sea polygons inside [0,W]x[0,H]. Walking the box perimeter clockwise on screen
-// keeps the box interior on the right, matching OSM's "water on the right" rule for coastlines.
-function coastToWater(chains, W, H) {
-  if (!chains.length) return [];
-  const joined = joinChains(chains);
+// ---------------------------------------------------------------- open outlines -> polygons along the sheet edge
+
+// Position along the sheet perimeter, clockwise on screen from the top-left corner.
+function perimPos(x, y, W, H) {
+  const d = [Math.abs(y), Math.abs(x - W), Math.abs(y - H), Math.abs(x)];
+  const e = d.indexOf(Math.min(...d));
+  if (e === 0) return clamp(x, 0, W);
+  if (e === 1) return W + clamp(y, 0, H);
+  if (e === 2) return W + H + (W - clamp(x, 0, W));
+  return 2 * W + H + (H - clamp(y, 0, H));
+}
+function perimPoint(s, W, H) {
   const P = 2 * (W + H);
-  const sOf = (x, y) => {
-    const d = [Math.abs(y), Math.abs(x - W), Math.abs(y - H), Math.abs(x)];
-    const e = d.indexOf(Math.min(...d));
-    if (e === 0) return clamp(x, 0, W);
-    if (e === 1) return W + clamp(y, 0, H);
-    if (e === 2) return W + H + (W - clamp(x, 0, W));
-    return 2 * W + H + (H - clamp(y, 0, H));
-  };
-  const ptOf = s => {
-    s = ((s % P) + P) % P;
-    if (s <= W) return [s, 0];
-    if (s <= W + H) return [W, s - W];
-    if (s <= 2 * W + H) return [W - (s - W - H), H];
-    return [0, H - (s - 2 * W - H)];
-  };
-  const snap = (x, y) => {
-    const d = [y, W - x, H - y, x];
-    const e = d.indexOf(Math.min(...d));
-    return e === 0 ? [clamp(x, 0, W), 0] : e === 1 ? [W, clamp(y, 0, H)] : e === 2 ? [clamp(x, 0, W), H] : [0, clamp(y, 0, H)];
-  };
-  const pieces = [], islands = [];
-  for (const c of joined) {
-    const f = flat(c);
-    if (isClosed(c)) {
-      const r = ring(c), bb = polyBBox(r);
-      if (bb[0] >= 0 && bb[1] >= 0 && bb[2] <= W && bb[3] <= H) { islands.push(r); continue; }
-    }
-    for (const q of clipLineRect(f, 0, 0, W, H)) {
-      if (q.length < 4) continue;
-      const a = snap(q[0], q[1]), b = snap(q[q.length - 2], q[q.length - 1]);
-      const pts = [a[0], a[1], ...q.slice(2, -2), b[0], b[1]];
-      pieces.push({ pts, s0: sOf(a[0], a[1]), s1: sOf(b[0], b[1]), used: false });
-    }
+  s = ((s % P) + P) % P;
+  if (s <= W) return [s, 0];
+  if (s <= W + H) return [W, s - W];
+  if (s <= 2 * W + H) return [W - (s - W - H), H];
+  return [0, H - (s - 2 * W - H)];
+}
+function snapEdge(x, y, W, H) {
+  const d = [y, W - x, H - y, x];
+  const e = d.indexOf(Math.min(...d));
+  return e === 0 ? [clamp(x, 0, W), 0] : e === 1 ? [W, clamp(y, 0, H)] : e === 2 ? [clamp(x, 0, W), H] : [0, clamp(y, 0, H)];
+}
+
+// A flat polyline clipped to the sheet, as pieces whose ends sit on the edge. strict: drop pieces that end inside.
+function edgePieces(f, W, H, strict) {
+  const out = [], tol = 1.5;
+  const onEdge = (x, y) => x <= tol || y <= tol || x >= W - tol || y >= H - tol;
+  for (const q of clipLineRect(f, 0, 0, W, H)) {
+    const n = q.length;
+    if (n < 4) continue;
+    if (strict && !(onEdge(q[0], q[1]) && onEdge(q[n - 2], q[n - 1]))) continue;
+    const a = snapEdge(q[0], q[1], W, H), b = snapEdge(q[n - 2], q[n - 1], W, H);
+    out.push({ pts: [a[0], a[1], ...q.slice(2, -2), b[0], b[1]], s0: perimPos(a[0], a[1], W, H), s1: perimPos(b[0], b[1], W, H) });
   }
-  const polys = [];
+  return out;
+}
+function reversePiece(q) {
+  const p = q.pts, r = [];
+  for (let i = p.length - 2; i >= 0; i -= 2) r.push(p[i], p[i + 1]);
+  return { pts: r, s0: q.s1, s1: q.s0 };
+}
+
+// Pieces with the area on their right-hand side -> closed polygons, joined clockwise along the sheet edge.
+function walkEdgePieces(pieces, W, H) {
+  const P = 2 * (W + H), polys = [];
+  const corners = [W, W + H, 2 * W + H, P];
+  const cornersX2 = corners.concat(corners.map(c => c + P));
   for (const start of pieces) {
     if (start.used) continue;
     start.used = true;
@@ -646,10 +802,9 @@ function coastToWater(chains, W, H) {
         if (d < bd) { bd = d; best = p; }
       }
       if (!best) break;
-      const corners = [W, W + H, 2 * W + H, P];
-      for (const c of corners.map(c => c).concat(corners.map(c => c + P))) {
+      for (const c of cornersX2) {
         const rel = c - cur.s1;
-        if (rel > 1e-6 && rel < bd - 1e-6) { const q = ptOf(c); poly.push(q[0], q[1]); }
+        if (rel > 1e-6 && rel < bd - 1e-6) { const q = perimPoint(c, W, H); poly.push(q[0], q[1]); }
       }
       if (best === start) break;
       best.used = true;
@@ -658,6 +813,22 @@ function coastToWater(chains, W, H) {
     }
     if (poly.length >= 6 && polyArea(poly) > 50) polys.push(poly);
   }
+  for (const p of pieces) delete p.used;
+  return polys;
+}
+
+// Coastline chains -> sea polygons inside [0,W]x[0,H] (OSM keeps the water on the right of a coastline).
+function coastToWater(chains, W, H) {
+  if (!chains.length) return [];
+  const pieces = [], islands = [];
+  for (const c of joinChains(chains)) {
+    if (isClosed(c)) {
+      const r = ring(c), bb = polyBBox(r);
+      if (bb[0] >= 0 && bb[1] >= 0 && bb[2] <= W && bb[3] <= H) { islands.push(r); continue; }
+    }
+    pieces.push(...edgePieces(flat(c), W, H, false));
+  }
+  const polys = walkEdgePieces(pieces, W, H);
   if (!polys.length && islands.length) polys.push([0, 0, W, 0, W, H, 0, H]);
   if (!islands.length) return polys;
   const holesOf = polys.map(() => []);
@@ -666,4 +837,46 @@ function coastToWater(chains, W, H) {
     if (i >= 0) holesOf[i].push(isl);
   }
   return polys.map((p, i) => mergeHoles(p, holesOf[i]));
+}
+
+// Outlines of area relations cut open by the crop box (or by a partial export). Member ways have no
+// reliable direction, so each open chain is closed both ways along the sheet edge and the side kept is the
+// one with less land in it (buildings, and roads for water); with no land either way, the smaller side,
+// unless the relation's bounding box lies well off the sheet and points the way.
+function closeOpenAreas(openAreas, bldgs, roads, W, H) {
+  const out = { water: [], park: [] };
+  if (!openAreas.length) return out;
+  const ec = 8, gw = Math.ceil(W / ec), gh = Math.ceil(H / ec);
+  const land = new Uint8Array(gw * gh), built = new Uint8Array(gw * gh);
+  for (const b of bldgs) rasterPoly(b.p, ec, gw, gh, (i) => { land[i] = 1; built[i] = 1; });
+  for (const r of roads) if (!r.bridge && r.k !== 'path') rasterPolyline(r.p, Math.max(r.w, ec), ec, gw, gh, (i) => { land[i] = 1; });
+  const cover = (polys, mask) => {
+    let n = 0, hit = 0;
+    for (const p of polys) rasterPoly(p, ec, gw, gh, (i) => { n++; hit += mask[i]; });
+    return { n, f: n ? hit / n : 0 };
+  };
+  for (const oa of openAreas) {
+    const mask = oa.kind === 'water' ? land : built;
+    const pieces = [];
+    for (const c of oa.chains) {
+      const parts = edgePieces(flat(c), W, H, true);
+      if (!parts.length) continue;
+      const a = cover(walkEdgePieces(parts.map(q => ({ ...q })), W, H), mask);
+      const b = cover(walkEdgePieces(parts.map(reversePiece), W, H), mask);
+      const hint = oa.hint, far = hint && (hint[0] < -0.1 * W || hint[1] < -0.1 * H || hint[0] > 1.1 * W || hint[1] > 1.1 * H);
+      let keep;
+      if (Math.max(a.f, b.f) > 0.04 && Math.abs(a.f - b.f) > 0.03) keep = a.f < b.f;
+      else if (far) {
+        const p0 = parts[0].pts, z = parts[parts.length - 1].pts;
+        keep = (z[z.length - 2] - p0[0]) * (hint[1] - p0[1]) - (z[z.length - 1] - p0[1]) * (hint[0] - p0[0]) > 0;
+      } else keep = a.n <= b.n;
+      for (const q of parts) pieces.push(keep ? q : reversePiece(q));
+    }
+    if (!pieces.length) continue;
+    for (const p of walkEdgePieces(pieces, W, H)) {
+      const holes = oa.holes.filter(h => h.length >= 6 && pointInPoly(p, h[0], h[1]));
+      out[oa.kind].push(holes.length ? mergeHoles(p, holes) : p);
+    }
+  }
+  return out;
 }

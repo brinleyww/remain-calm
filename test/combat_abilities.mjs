@@ -155,6 +155,8 @@ for (const id of ['apc', 'tank']) {
 {
   const w = battle();
   const civs = crowd(w, TYPE.CIV, 450, 250, 60, 14);
+  // only the test crowd: the map's own residents walking in from afar would keep the bus waiting at random
+  for (let i = 0; i < w.A.n; i++) if (w.A.type[i] === TYPE.CIV && !civs.includes(i)) w.remove(i);
   const e0 = w.stats.civEvac;
   assert(use(w, 'bus', 450, 250).ok && w.pickups.length === 1, 'bus: pulls up and opens a pickup');
   run(w, 6);
@@ -188,7 +190,8 @@ for (const id of ['apc', 'tank']) {
 // ---------------------------------------------------------------- 7 bulldozer
 {
   const b = map.buildings.findIndex((q) => Math.abs(q.p[0] - 158) < 1 && Math.abs(q.p[1] - 158) < 1);
-  const w = battle(['zombie.speed=0']);
+  // no fire from the collapse: whether it starts is a coin flip that would burn the horde before the dozer arrives
+  const w = battle(['zombie.speed=0', 'building.collapseFireChance=0']);
   const bd = w.buildings[b];
   w.collapseBuilding(b, 0, 1);
   const rub = w.cellAt(bd.cx, bd.cy);

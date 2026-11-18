@@ -3,7 +3,7 @@
 
 import { clamp } from '../util/geom.js';
 
-const ease = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+export const ease = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 export class Camera {
   constructor(o = {}) {
@@ -163,6 +163,9 @@ export class Camera {
   }
 
   stop() { this._tz = null; this._fly = null; return this; }
+
+  // Jumps a flight in progress to its destination.
+  finishFlight() { const f = this._fly; if (f) this.centerOn(f.x1, f.y1, f.z1); return this; }
 
   // Advances smooth zoom / flights. Returns true when the view changed.
   update(dt) {
