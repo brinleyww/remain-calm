@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-palette="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remain Calm - Field Test</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/game.css">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--desk); }
+  #game { position: fixed; inset: 0; }
+  .dev-err { position: fixed; left: 16px; bottom: 16px; z-index: 999; max-width: 60ch; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<script type="module">
+// Developer boot: a generated city straight into planning with a broad loadout and generous funds.
+// URL options: ?seed=7&size=1.6&water=river&density=0.6&stages=4&stage=0&mode=free&difficulty=normal&palette=paper&money=40000&sp=30
+//              &units=garrison,sniper&ab=airstrike:2,nuke:1&mut=line1|line2&nowelcome
+import { generateCity } from './js/map/citygen.js';
+import { Session } from './js/game/session.js';
+
+const q = new URLSearchParams(location.search);
+const num = (k, d) => (q.has(k) && Number.isFinite(+q.get(k)) ? +q.get(k) : d);
+const mode = q.get('mode') || 'free';
+const map = generateCity({
+  seed: q.get('seed') || 20261118,
+  sizeKm: num('size', 1.6),
+  water: q.get('water') || 'river',
+  density: num('density', 0.6),
+  bridges: num('bridges', 3),
+  stages: num('stages', 4),
+  name: q.get('name') || '',
+});
+if (q.get('palette')) map.palette = q.get('palette');
+if (!map.welcome) map.welcome = 'Field test of the response console. Ring a busy block with a safe zone, give it a gate, man the tall roofs, then press READY.';
+const mutators = [];
+if (mode !== 'sandbox') mutators.push(`economy.moneyBase=${num('money', 40000)}`, `economy.spBase=${num('sp', 30)}`);
+for (const l of (q.get('mut') || '').split('|')) if (l.trim()) mutators.push(l.trim());
+
+const loadout = {
+  units: (q.get('units') || 'garrison,sniper,turret,mortar,mine,spikes,c4').split(',').filter(Boolean),
+  abilities: { paratroopers: 2, airstrike: 1, fireBomb: 1, gasBomb: 1, helicopter: 1, demolition: 1 },
+};
+if (q.get('ab')) {
+  loadout.abilities = {};
+  for (const part of q.get('ab').split(',')) { const [id, n] = part.split(':'); if (id) loadout.abilities[id] = +n || 1; }
+}
+
+const s = new Session(document.getElementById('game'), {
+  map, mode, difficulty: q.get('difficulty') || 'normal', mutators, loadout, startStage: num('stage', 0),
+  unlocked: null, isUnlocked: () => true, maxUpgradeLevel: 5,
+  skipWelcome: q.has('nowelcome'),
+  palette: q.get('palette') || undefined,
+  onStageResult: (r) => { console.info('[dev] stage result', r.won ? 'won' : 'lost', r.pct.toFixed(1) + '%', r.badge || ''); return null; },
+  onExit: (summary) => { console.info('[dev] exit', summary.reason); location.reload(); },
+});
+s.start().catch((e) => {
+  console.error(e);
+  const el = document.createElement('pre');
+  el.className = 'dev-err card raised';
+  el.textContent = 'Session failed to start:\n' + (e && e.stack || e);
+  document.body.append(el);
+});
+window.__devMap = map;
+</script>
+</body>
+</html>

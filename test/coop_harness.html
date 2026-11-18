@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-palette="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Co-op Harness</title>
+<link rel="stylesheet" href="../css/base.css">
+<style>
+  html, body { margin: 0; height: 100%; }
+  #app { position: relative; min-height: 100vh; }
+  #run { padding: 24px; font: 400 14px/1.5 "IBM Plex Mono", monospace; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+// Stand-in for the game session: builds the world from the lobby's hand-over and runs the lockstep loop.
+import { openCoopLobby } from '../js/ui/coop_lobby.js';
+import { World } from '../js/sim/world.js';
+const H = window.__co = { started: false, exited: false, log: [] };
+H.lobby = openCoopLobby(document.getElementById('app'), {
+  onExit: () => { H.exited = true; },
+  onStart: ({ link, map, role, owner, difficulty, mutators, makeDriver }) => {
+    const world = new World(map, { owners: 2, difficulty, mutators, stage: 0 });
+    const driver = makeDriver(world);
+    Object.assign(H, { started: true, link, map, role, owner, difficulty, mutators, world, driver });
+    driver.onApply = (cmd, res, local) => { if (local) H.log.push([cmd.t, res.ok, res.reason || '']); };
+    driver.onDesync = info => { H.desync = info; };
+    driver.onPeer = msg => { H.peer = msg; };
+    const out = document.createElement('pre');
+    out.id = 'run';
+    document.getElementById('app').append(out);
+    let last = performance.now();
+    setInterval(() => {
+      const now = performance.now();
+      driver.advance((now - last) / 1000);
+      last = now;
+      out.textContent = `${role} · owner ${owner} · turn ${driver.turn} · tick ${world.tick} · phase ${world.phase} · civilians ${world.stats.civAlive} · zombies ${world.stats.zombies}${driver.waiting ? ' · waiting for partner' : ''}${H.desync ? ' · DESYNC' : ''}`;
+    }, 16);
+  },
+});
+</script>
+</body>
+</html>

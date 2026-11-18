@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-palette="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Editor Harness</title>
+<link rel="stylesheet" href="../css/base.css">
+<style>html, body { margin: 0; height: 100%; } #app { position: relative; height: 100vh; }</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+import { openEditor } from '../js/ui/editor.js';
+const H = window.__harness = { exits: 0, plays: [], api: null };
+function open(map) {
+  H.api = openEditor(document.getElementById('app'), {
+    map,
+    onExit: () => { H.exits++; },
+    onTestPlay: m => { H.plays.push(m); },
+  });
+}
+H.open = open;
+const q = new URLSearchParams(location.search);
+if (!q.has('manual')) open(null);
+</script>
+</body>
+</html>

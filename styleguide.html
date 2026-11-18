@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en" data-palette="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graphic Standards</title>
+<link rel="stylesheet" href="css/base.css">
+<style>
+  body { min-height: 100vh; }
+  .sg-top { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 24px; padding: 28px 40px 18px; border-bottom: 3px double var(--ink); }
+  .sg-top .display { font-size: clamp(2.6rem, 6vw, 4.8rem); }
+  .sg-sub { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; margin-top: 10px; }
+  .sg-sub .h3 { margin: 0; }
+  .sg-wrap { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 32px; padding: 26px 40px 80px; }
+  .sg-index { position: sticky; top: 18px; align-self: start; }
+  .sg-index ol { list-style: none; margin: 8px 0 0; padding: 0; counter-reset: s; border-top: 1px solid var(--ink); }
+  .sg-index li { counter-increment: s; border-bottom: 1px solid color-mix(in srgb, var(--ink-3) 60%, transparent); }
+  .sg-index a { display: flex; gap: 10px; padding: 6px 0 5px; text-decoration: none; color: var(--ink); font: 600 var(--fs-2)/1.1 var(--font-label); letter-spacing: .1em; text-transform: uppercase; }
+  .sg-index a::before { content: counter(s, decimal-leading-zero); font: 500 var(--fs-1)/1.1 var(--font-mono); color: var(--ink-3); letter-spacing: 0; }
+  .sg-index a:hover { color: var(--stamp); }
+  .sg-sec { margin-bottom: 56px; scroll-margin-top: 16px; }
+  .sg-sec > header { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid var(--ink); padding-bottom: 6px; margin-bottom: 18px; }
+  .sg-sec > header h2 { margin: 0; }
+  .sg-sec > header .form-no { margin-left: auto; }
+  .sg-num { font: 500 var(--fs-3)/1 var(--font-mono); color: var(--stamp); }
+  .sg-row { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: center; margin-bottom: 18px; }
+  .sg-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 26px; align-items: start; }
+  .sg-cap { font: 500 var(--fs-0)/1.3 var(--font-mono); letter-spacing: .08em; color: var(--ink-3); text-transform: uppercase; margin: 0 0 8px; }
+
+  .map-shell { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 0; }
+  .map-view { position: relative; height: 620px; border: 1px solid var(--ink); border-right: 0; overflow: hidden; background: var(--desk); touch-action: none; }
+  .map-view canvas { width: 100%; height: 100%; cursor: grab; }
+  .map-view.dragging canvas { cursor: grabbing; }
+  .map-side { border: 1px solid var(--ink); background: var(--card); padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; overflow: auto; max-height: 620px; }
+  .map-side .seg { width: 100%; }
+  .map-side .seg > button { flex: 1; padding-left: 0; padding-right: 0; }
+  .map-hud { position: absolute; left: 12px; bottom: 10px; pointer-events: none; }
+  .map-coords { position: absolute; right: 12px; bottom: 10px; pointer-events: none; font: 500 var(--fs-1)/1 var(--font-mono); color: var(--ink-2); background: var(--card); border: 1px solid var(--ink-3); padding: 4px 6px; }
+  .mini { width: 100%; height: 170px; border: 1px solid var(--ink-2); cursor: crosshair; }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+  .legend .kv { font-size: var(--fs-1); }
+  .lg-dot { width: 10px; height: 10px; flex: none; }
+  .lg-row { display: flex; align-items: center; gap: 6px; font: 400 var(--fs-1)/1.3 var(--font-mono); }
+  .ramp { display: flex; border: 1px solid var(--ink-2); }
+  .ramp > span { flex: 1; height: 12px; }
+  .ramp-lab { display: flex; justify-content: space-between; font: 400 var(--fs-0)/1.4 var(--font-mono); color: var(--ink-3); }
+
+  .type-row { display: grid; grid-template-columns: 120px 1fr; gap: 16px; align-items: baseline; padding: 10px 0; border-bottom: 1px dotted var(--ink-3); }
+  .chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 12px; }
+  .chip-c { border: 1px solid var(--ink-2); background: var(--card); box-shadow: 2px 2px 0 -1px var(--card), 2px 2px 0 0 var(--ink-3); }
+  .chip-c > i { display: block; height: 52px; background: var(--sw); border-bottom: 1px solid var(--ink-2); }
+  .chip-c > div { padding: 5px 7px 6px; font: 500 var(--fs-0)/1.35 var(--font-mono); }
+  .chip-c b { display: block; font: 600 var(--fs-1)/1.2 var(--font-label); letter-spacing: .08em; text-transform: uppercase; }
+  .preset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .preset { padding: 14px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); }
+  .preset canvas { width: 100%; height: 200px; border: 1px solid var(--ink-2); }
+  @media (max-width: 1100px) { .map-shell { grid-template-columns: 1fr; } .map-view { border-right: 1px solid var(--ink); } .map-side { max-height: none; } .preset-row { grid-template-columns: 1fr; } }
+  @media (max-width: 800px) { .sg-wrap { grid-template-columns: 1fr; padding: 16px; } .sg-index { position: static; } .sg-top { grid-template-columns: 1fr; padding: 20px 16px 14px; } }
+</style>
+</head>
+<body class="paper-bg">
+<header class="sg-top">
+  <div>
+    <div class="form-no">Office of Civil Preparedness &middot; Form OCP-0 &middot; Rev. 1</div>
+    <h1 class="display">Remain Calm</h1>
+    <div class="sg-sub"><span class="h3">Municipal Outbreak Response</span><span class="muted small">Graphic standards &amp; plotting-sheet specimen</span></div>
+  </div>
+  <div class="vstack gap-2" style="justify-items:end">
+    <span class="label">Print preset</span>
+    <div class="seg" id="palSeg" role="group" aria-label="Print preset">
+      <button data-pal="paper" class="is-on">Paper</button><button data-pal="blueprint">Blueprint</button><button data-pal="night">Night Print</button>
+    </div>
+  </div>
+</header>
+
+<div class="sg-wrap">
+  <nav class="sg-index" aria-label="Sections">
+    <span class="label">Contents</span>
+    <ol>
+      <li><a href="#map">Plotting sheet</a></li>
+      <li><a href="#presets">Print presets</a></li>
+      <li><a href="#type">Typography</a></li>
+      <li><a href="#colour">Colour</a></li>
+      <li><a href="#controls">Controls</a></li>
+      <li><a href="#stamps">Stamps &amp; badges</a></li>
+      <li><a href="#cards">Cards &amp; folders</a></li>
+      <li><a href="#forms">Form fields</a></li>
+      <li><a href="#data">Ledgers &amp; meters</a></li>
+      <li><a href="#comms">Ticker &amp; tooltip</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <section class="sg-sec" id="map">
+      <header><span class="sg-num">01</span><h2>Plotting sheet</h2><span class="form-no" id="mapForm">Sheet 1 of 1</span></header>
+      <div class="map-shell">
+        <div class="map-view" id="mapView">
+          <canvas id="mapCanvas"></canvas>
+          <div class="map-coords" id="coords">--</div>
+          <div class="tooltip" id="tip" hidden></div>
+        </div>
+        <aside class="map-side">
+          <div class="field">
+            <label for="citySel">City</label>
+            <div class="hstack" style="flex-wrap:nowrap">
+              <select class="select" id="citySel">
+                <option value="1600">Town &middot; 1.6 km</option>
+                <option value="2600" selected>City &middot; 2.6 km</option>
+                <option value="4000">Metro &middot; 4.0 km</option>
+              </select>
+              <button class="btn btn-sm" id="regen" title="New seed">Reseed</button>
+            </div>
+            <span class="hint" id="cityStats">--</span>
+          </div>
+          <div class="field">
+            <span class="field-label">View <kbd>V</kbd> <kbd>C</kbd></span>
+            <div class="seg" id="viewSeg"><button data-view="normal" class="is-on">Plan</button><button data-view="height">Heights</button><button data-view="specials">Specials</button></div>
+          </div>
+          <div class="field">
+            <span class="field-label">Stage boundary</span>
+            <div class="seg" id="stageSeg"></div>
+            <div class="hstack gap-3" style="margin-top:4px">
+              <label class="toggle"><input type="checkbox" id="dimT" checked><span class="toggle-track"></span>Dim outside</label>
+              <label class="toggle"><input type="checkbox" id="allT"><span class="toggle-track"></span>All</label>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">Damage test</span>
+            <div class="hstack">
+              <button class="btn btn-sm" id="collapseB">Collapse 15</button>
+              <button class="btn btn-sm" id="bridgeB">Drop bridge</button>
+              <button class="btn btn-sm btn-ghost" id="restoreB">Restore</button>
+            </div>
+          </div>
+          <div>
+            <div class="spread"><span class="label">Overview</span><span class="tiny faint">click to move</span></div>
+            <canvas class="mini" id="mini"></canvas>
+          </div>
+          <div class="vstack gap-1" id="perf">
+            <div class="kv"><span>Static draw</span><i></i><b id="pfDraw">--</b></div>
+            <div class="kv"><span>Pan frame avg</span><i></i><b id="pfPan">--</b></div>
+            <div class="kv"><span>Tiles cached</span><i></i><b id="pfTiles">--</b></div>
+            <div class="kv"><span>Zoom</span><i></i><b id="pfZoom">--</b></div>
+          </div>
+          <div>
+            <span class="label">Agents (palette.js)</span>
+            <div class="legend" id="legend" style="margin-top:6px"></div>
+          </div>
+          <div>
+            <span class="label">Height classes</span>
+            <div class="ramp" id="ramp" style="margin-top:6px"></div>
+            <div class="ramp-lab"><span>low</span><span>tall roofs</span></div>
+          </div>
+        </aside>
+      </div>
+      <p class="small muted" style="margin-top:10px">Drag to pan, wheel to zoom, <kbd>Home</kbd> fits the stage, <kbd>1</kbd>&ndash;<kbd>7</kbd> pick a stage. Hover a building for its record.</p>
+    </section>
+
+    <section class="sg-sec" id="presets">
+      <header><span class="sg-num">02</span><h2>Print presets</h2><span class="form-no">Map setting &middot; colour preset</span></header>
+      <div class="preset-row">
+        <div class="preset" data-palette="paper"><div class="spread"><h3>Paper</h3><span class="badge">Default</span></div><canvas data-preset="paper"></canvas></div>
+        <div class="preset" data-palette="blueprint"><div class="spread"><h3>Blueprint</h3><span class="badge">Cyanotype</span></div><canvas data-preset="blueprint"></canvas></div>
+        <div class="preset" data-palette="night"><div class="spread"><h3>Night Print</h3><span class="badge">Low light</span></div><canvas data-preset="night"></canvas></div>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="type">
+      <header><span class="sg-num">03</span><h2>Typography</h2><span class="form-no">IBM Plex Mono &middot; Archivo Narrow</span></header>
+      <div class="type-row"><span class="sg-cap">Display 72</span><span class="display">Stage 3 cleared</span></div>
+      <div class="type-row"><span class="sg-cap">H1 34</span><h1 style="margin:0">Evacuation order in force</h1></div>
+      <div class="type-row"><span class="sg-cap">H2 26</span><h2 style="margin:0">Northgate district</h2></div>
+      <div class="type-row"><span class="sg-cap">H3 16</span><h3 style="margin:0">Unit requisition</h3></div>
+      <div class="type-row"><span class="sg-cap">Label 11</span><span class="label">Population in boundary</span></div>
+      <div class="type-row"><span class="sg-cap">Body mono 14</span><p style="margin:0">Residents are advised to stay indoors and move only toward signed safe-zone gates. Officers will escort stragglers. Report sightings to the nearest post.</p></div>
+      <div class="type-row"><span class="sg-cap">Data mono 12</span><span class="data small">CIV 41,208 &nbsp; SAFE 18,940 &nbsp; LOST 2,117 &nbsp; T+04:32</span></div>
+    </section>
+
+    <section class="sg-sec" id="colour">
+      <header><span class="sg-num">04</span><h2>Colour</h2><span class="form-no">Tokens follow the print preset</span></header>
+      <p class="sg-cap">Paper &amp; ink</p>
+      <div class="chips" id="chipsBase"></div>
+      <p class="sg-cap" style="margin-top:18px">Signal inks</p>
+      <div class="chips" id="chipsSignal"></div>
+      <p class="sg-cap" style="margin-top:18px">Map &amp; agents</p>
+      <div class="chips" id="chipsMap"></div>
+    </section>
+
+    <section class="sg-sec" id="controls">
+      <header><span class="sg-num">05</span><h2>Controls</h2><span class="form-no">.btn .seg .keycap</span></header>
+      <div class="sg-row">
+        <button class="btn btn-primary btn-lg">Ready <span class="keycap">Space</span></button>
+        <button class="btn">Safe zone <span class="keycap">B</span></button>
+        <button class="btn btn-go">Next stage</button>
+        <button class="btn btn-ghost">Map select</button>
+        <button class="btn" disabled>Upgrade <span class="keycap">U</span></button>
+        <button class="btn btn-sm">Refund</button>
+        <button class="btn btn-sm is-on">Paint</button>
+        <button class="btn btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="sg-row">
+        <div class="seg" role="group" aria-label="Speed"><button>&#10074;&#10074;</button><button>0.5&times;</button><button class="is-on">1&times;</button><button>2&times;</button><button>4&times;</button></div>
+        <div class="seg"><button class="is-on">Pursue</button><button>Hold</button></div>
+        <div class="seg"><button>Normal</button><button class="is-on">Hardcore</button><button disabled>Ultra</button></div>
+      </div>
+      <div class="sg-cols">
+        <div class="card flat">
+          <div class="card-head"><span class="card-title">Key bindings</span><span class="card-no">OCP-12</span></div>
+          <div class="vstack gap-1">
+            <div class="kv"><span><kbd>Space</kbd> Ready / pause</span><i></i><b>battle</b></div>
+            <div class="kv"><span><kbd>B</kbd> Safe zone</span><i></i><b>$100+</b></div>
+            <div class="kv"><span><kbd>G</kbd> Gate</span><i></i><b>$50</b></div>
+            <div class="kv"><span><kbd>Q</kbd> Evac corridor</span><i></i><b>$30+</b></div>
+            <div class="kv"><span><kbd>Ctrl</kbd> <kbd>Z</kbd> Undo</span><i></i><b>planning</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="stamps">
+      <header><span class="sg-num">06</span><h2>Stamps &amp; badges</h2><span class="form-no">.stamp .badge-* .seal</span></header>
+      <div class="sg-row" style="gap:28px;padding:14px 4px 22px">
+        <span class="stamp">Outbreak confirmed</span>
+        <span class="stamp stamp-green tilt-3">Approved</span>
+        <span class="stamp stamp-blue tilt-2">Filed <small>17 NOV</small></span>
+        <span class="stamp stamp-ink tilt-4 stamp-sm">Copy</span>
+        <span class="stamp stamp-orange tilt-1 stamp-sm">Zone breached</span>
+        <span class="stamp stamp-round tilt-3">Sector<br>clear</span>
+        <span class="stamp stamp-lg tilt-1">Void</span>
+      </div>
+      <div class="sg-row">
+        <span class="badge badge-bronze">Bronze</span><span class="badge badge-silver">Silver</span><span class="badge badge-gold">Gold</span>
+        <span class="badge badge-sapphire">Sapphire</span><span class="badge badge-emerald">Emerald</span><span class="badge badge-ruby">Ruby</span>
+        <span class="badge badge-diamond">Diamond</span><span class="badge none">Unrated</span>
+      </div>
+      <div class="sg-row">
+        <span class="badge solid badge-bronze">Bronze</span><span class="badge solid badge-silver">Silver</span><span class="badge solid badge-gold">Gold</span>
+        <span class="badge solid badge-sapphire">Sapphire</span><span class="badge solid badge-emerald">Emerald</span><span class="badge solid badge-ruby">Ruby</span>
+        <span class="badge solid badge-diamond">Diamond</span>
+      </div>
+      <div class="sg-row" style="gap:22px;padding:8px 4px">
+        <span class="seal badge-bronze" style="--tier:var(--bronze)">Bronze<small>4% saved</small></span>
+        <span class="seal" style="--tier:var(--gold);--rot:4deg">Gold<small>22% saved</small></span>
+        <span class="seal" style="--tier:var(--ruby);--rot:-2deg">Ruby<small>41% saved</small></span>
+        <span class="seal" style="--tier:var(--diamond);--rot:7deg;--size:8rem">Diamond<small>47.3% saved</small></span>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="cards">
+      <header><span class="sg-num">07</span><h2>Cards &amp; folders</h2><span class="form-no">.card .folder .tab</span></header>
+      <div class="sg-cols">
+        <div class="card ruled">
+          <span class="card-corner"></span>
+          <div class="card-head"><span class="card-title">Fire station 4</span><span class="card-no">CIV &middot; No. 0417</span></div>
+          <p>Civic building inside Zone A.</p>
+          <p>Function: <b>Police</b> &mdash; 38 / 100 officers.</p>
+          <p>Height 14 m &middot; integrity 100%.</p>
+          <p class="faint">Stance: pursue within 300 m.</p>
+        </div>
+        <div class="card raised">
+          <div class="card-head"><span class="card-title">Garrison &middot; Lv 3</span><span class="card-no">UNIT 22</span></div>
+          <div class="vstack gap-1">
+            <div class="kv"><span>Range</span><i></i><b>94 m</b></div>
+            <div class="kv"><span>Damage</span><i></i><b>11.3</b></div>
+            <div class="kv"><span>Magazine</span><i></i><b>180 / 180</b></div>
+            <div class="kv"><span>Reloads</span><i></i><b>&infin; in zone</b></div>
+            <div class="kv"><span>Kills</span><i></i><b>412</b></div>
+          </div>
+          <div class="hstack" style="margin-top:12px"><button class="btn btn-sm">Upgrade $84</button><button class="btn btn-sm btn-ghost">Refund</button></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">Debrief</span><span class="card-no">STAGE 2</span></div>
+          <div class="spread" style="align-items:center">
+            <div><div class="display" style="font-size:var(--fs-8)">31.4%</div><span class="label">Civilians saved</span></div>
+            <span class="seal" style="--tier:var(--sapphire);--size:5.5rem">Sapphire</span>
+          </div>
+        </div>
+      </div>
+      <div class="folder" style="margin-top:34px;max-width:780px">
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" role="tab" aria-selected="true"><span class="tab-no">01</span>Campaign</button>
+          <button class="tab" role="tab"><span class="tab-no">02</span>Free play</button>
+          <button class="tab" role="tab"><span class="tab-no">03</span>Daily</button>
+          <button class="tab" role="tab"><span class="tab-no">04</span>Sandbox</button>
+        </div>
+        <div class="folder-body">
+          <div class="spread" style="margin-bottom:12px"><span class="folder-label">FILE 07-A &middot; CITIES</span><span class="small muted">3 of 6 unlocked</span></div>
+          <table class="table ledger">
+            <thead><tr><th>City</th><th>Stages</th><th class="num">Pop.</th><th>Best</th></tr></thead>
+            <tbody>
+              <tr><td>Harrow Ferry</td><td>4</td><td class="num">38,200</td><td><span class="badge badge-gold">Gold</span></td></tr>
+              <tr><td>Calder Mills</td><td>5</td><td class="num">61,950</td><td><span class="badge badge-silver">Silver</span></td></tr>
+              <tr><td>Port Ansel</td><td>6</td><td class="num">94,400</td><td><span class="badge none">Unrated</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="forms">
+      <header><span class="sg-num">08</span><h2>Form fields</h2><span class="form-no">.field .input .select .toggle .slider</span></header>
+      <div class="sg-cols">
+        <div class="vstack gap-4">
+          <div class="field"><label for="f1">Place or postcode</label><input class="input" id="f1" placeholder="e.g. Main St &amp; 3rd Ave, Springfield"><span class="hint">Search is sent only when you press Find.</span></div>
+          <div class="field"><label for="f2">Map name</label><input class="input line" id="f2" value="Harrow Ferry (revised)"></div>
+          <div class="field"><label for="f3">Seed</label><input class="input is-invalid" id="f3" value="12x9"><span class="error">Seed must be a whole number.</span></div>
+        </div>
+        <div class="vstack gap-4">
+          <div class="field"><label for="f4">Water</label><select class="select" id="f4"><option>None</option><option selected>River</option><option>Coast</option><option>Lake</option><option>Islands</option></select></div>
+          <div class="field"><label for="f5">Population scale <span class="data" id="f5v">35%</span></label><input type="range" class="slider" id="f5" min="5" max="100" value="35"></div>
+          <div class="hstack gap-4">
+            <label class="toggle"><input type="checkbox" checked><span class="toggle-track"></span>Auto-pause</label>
+            <label class="toggle"><input type="checkbox"><span class="toggle-track"></span>Show tips</label>
+          </div>
+          <div class="hstack gap-4">
+            <label class="check"><input type="checkbox" checked>Sprinters</label>
+            <label class="check"><input type="checkbox">Iron Hide</label>
+            <label class="check"><input type="checkbox" checked>Tide</label>
+          </div>
+        </div>
+        <div class="field"><label for="f6">Mutator lines</label><textarea class="input" id="f6"># later lines win
+zombie.speed=4.76
+outbreak.maxSites=18</textarea></div>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="data">
+      <header><span class="sg-num">09</span><h2>Ledgers &amp; meters</h2><span class="form-no">.table .meter</span></header>
+      <div class="sg-cols" style="grid-template-columns: minmax(0, 1.4fr) minmax(260px, 1fr)">
+        <table class="table ledger">
+          <caption>Unit return &middot; stage 2</caption>
+          <thead><tr><th>Unit</th><th class="num">Count</th><th class="num">Kills</th><th class="num">Spent</th><th class="num">$ / kill</th></tr></thead>
+          <tbody>
+            <tr><td>Garrison</td><td class="num">24</td><td class="num">3,912</td><td class="num">$2,860</td><td class="num">0.73</td></tr>
+            <tr><td>Sniper</td><td class="num">6</td><td class="num">418</td><td class="num">$300</td><td class="num">0.72</td></tr>
+            <tr class="is-sel"><td>Mortar</td><td class="num">4</td><td class="num">1,204</td><td class="num">$306</td><td class="num">0.25</td></tr>
+            <tr><td>Turret</td><td class="num">3</td><td class="num">655</td><td class="num">$270</td><td class="num">0.41</td></tr>
+            <tr><td>Airstrike</td><td class="num">2</td><td class="num">871</td><td class="num dim">2 SP</td><td class="num dim">&mdash;</td></tr>
+          </tbody>
+          <tfoot><tr><td>Total</td><td class="num">39</td><td class="num">7,060</td><td class="num">$3,736</td><td class="num">0.53</td></tr></tfoot>
+        </table>
+        <div class="vstack gap-4">
+          <div>
+            <div class="meter-row"><span class="label">Budget</span><span class="meter-val">$6,240 <small>/ $9,800</small></span></div>
+            <div class="meter" style="--v:.637;--q:.09"><i class="meter-fill"></i><i class="meter-quote"></i></div>
+            <div class="hint tiny faint" style="margin-top:4px">Hatched: price of the item under the cursor.</div>
+          </div>
+          <div>
+            <div class="meter-row"><span class="label">Command points</span><span class="meter-val">7 <small>/ 8 SP</small></span></div>
+            <div class="meter warn" style="--v:.875"><i class="meter-fill"></i></div>
+          </div>
+          <div>
+            <div class="meter-row"><span class="label">Zone land</span><span class="meter-val red">31% <small>/ 30%</small></span></div>
+            <div class="meter over" style="--v:1"><i class="meter-fill"></i></div>
+          </div>
+          <div>
+            <div class="meter-row"><span class="label">Wall integrity</span><span class="meter-val">88%</span></div>
+            <div class="meter thin go" style="--v:.88"><i class="meter-fill"></i></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sg-sec" id="comms">
+      <header><span class="sg-num">10</span><h2>Ticker, log &amp; tooltip</h2><span class="form-no">.ticker .log .tooltip .modal</span></header>
+      <div class="ticker scroll" style="--ticker-sec:38s;margin-bottom:22px">
+        <div class="ticker-track" id="tickTrack">
+          <span class="tick"><time>T+00:12</time>Safe zone A sealed, 2 gates open</span>
+          <span class="tick alert"><time>T+00:31</time>Outbreak confirmed at 4 sites</span>
+          <span class="tick warn"><time>T+01:10</time>Zombies are mutating near Mill Rd</span>
+          <span class="tick good"><time>T+01:44</time>Bus departed with 400 aboard</span>
+          <span class="tick"><time>T+02:02</time>Bridge on Ferry Ln at 34% integrity</span>
+        </div>
+      </div>
+      <div class="sg-cols">
+        <div class="card flat" style="padding-top:8px">
+          <span class="label">Incident log</span>
+          <ul class="log" style="margin-top:6px">
+            <li><time>00:12</time>Zone A sealed. 2 gates.</li>
+            <li class="alert"><time>00:31</time>OUTBREAK CONFIRMED</li>
+            <li class="warn"><time>01:10</time>Mosh pit forming, 20 s</li>
+            <li class="good"><time>01:44</time>Bus away, 400 saved</li>
+            <li><time>02:02</time>Sniper 4 out of reloads</li>
+          </ul>
+        </div>
+        <div style="padding:6px 0 0 4px">
+          <div class="tooltip is-static" data-side="top">
+            <div class="tooltip-title">Ferry Lane bridge</div>
+            <div class="tooltip-sub">Road over water &middot; 62 m</div>
+            <div class="kv"><span>Structural integrity</span><i></i><b>34%</b></div>
+            <div class="kv"><span>HP</span><i></i><b>421 / 1,240</b></div>
+          </div>
+        </div>
+        <div class="vstack gap-3">
+          <button class="btn" id="openModal">Open pause menu <span class="keycap">Esc</span></button>
+          <span class="small muted">Modal: flat backdrop, solid offset, double rule under the title.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+    <div class="modal-head"><h3 class="modal-title" id="mTitle">Paused</h3><button class="modal-close" id="closeModal" aria-label="Close">&times;</button></div>
+    <div class="modal-body">
+      <div class="vstack gap-2">
+        <div class="kv"><span>Stage</span><i></i><b>2 of 5</b></div>
+        <div class="kv"><span>Elapsed</span><i></i><b>04:32</b></div>
+        <div class="kv"><span>Civilians alive</span><i></i><b>18,940</b></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost grow">Quit</button><button class="btn">Settings</button><button class="btn">Retry stage</button><button class="btn btn-primary" id="resume">Resume</button></div>
+  </div>
+</div>
+
+<script type="module">
+import { Rng } from './js/util/rng.js';
+import { rasterPoly, rasterPolyline, polyArea, polyBBox, clamp } from './js/util/geom.js';
+import { Camera } from './js/render/camera.js';
+import { getPalette, applyPalette, PALETTES } from './js/render/palette.js';
+import { drawStatic, drawMinimap, makeStaticCache, getStaticCache, invalidateBuilding, invalidateBridge, pickBuilding, pickBridge, drawScaleBar } from './js/render/maprender.js';
+
+// ---------- specimen city (stand-in for js/map/citygen.js) ----------
+function specimenCity(seed, size) {
+  const rng = new Rng(seed);
+  const W = size, H = size;
+  const map = { format: 'rcmap', v: 1, name: 'Specimen Borough', author: 'OCP', desc: '', welcome: '', source: 'gen', seed, geo: null, palette: 'paper',
+                w: W, h: H, roads: [], water: [], parks: [], buildings: [], levels: [], spawns: [] };
+  const ph = rng.range(0, 6);
+  const rc = x => H * 0.63 + Math.sin(x / W * Math.PI * 2.2 + ph) * H * 0.06 + Math.sin(x / W * 11 + ph * 2) * 14;
+  const rw = x => 42 + 16 * Math.sin(x / W * 5.1 + 1 + ph);
+  const top = [], bot = [];
+  for (let x = -10; x <= W + 10; x += 16) { top.push(x, rc(x) - rw(x)); bot.push(x, rc(x) + rw(x)); }
+  const river = top.slice();
+  for (let k = bot.length - 2; k >= 0; k -= 2) river.push(bot[k], bot[k + 1]);
+  map.water.push({ p: river });
+  const ry = x => H * 0.28 + Math.sin(x / W * 3.3 + ph) * H * 0.035;
+  const nearRiver = (x, y, pad) => Math.abs(y - rc(x)) < rw(x) + pad;
+  const nearRail = (x, y, pad) => Math.abs(y - ry(x)) < pad;
+
+  const xs = [], ys = [];
+  for (let x = rng.range(20, 60); x < W - 30; x += rng.range(84, 128)) xs.push(x);
+  for (let y = rng.range(20, 60); y < H - 30; y += rng.range(84, 128)) ys.push(y);
+  const major = (i) => i % 4 === 1;
+  const cx = W * 0.5, cy = H * 0.45;
+  const wob = (i) => (rng.next() - 0.5) * 4;
+
+  xs.forEach((x, i) => {
+    const w = major(i) ? 15 : 9, k = major(i) ? 'major' : 'minor';
+    const y0 = rc(x) - rw(x) - 4, y1 = rc(x) + rw(x) + 4;
+    const seg = (a, b) => { const p = []; for (let y = a; y <= b; y += 60) p.push(x + wob(), y); p.push(x, b); if (p.length >= 4) map.roads.push({ p, w, k }); };
+    seg(0, y0);
+    seg(y1, H);
+    if (major(i) || rng.chance(0.18)) map.roads.push({ p: [x, y0, x, y1], w, k: 'bridge', name: 'Bridge ' + (i + 1) });
+  });
+  ys.forEach((y, j) => {
+    const w = major(j) ? 15 : 9, k = major(j) ? 'major' : 'minor';
+    let p = [];
+    for (let x = 0; x <= W; x += 24) {
+      if (nearRiver(x, y, 6)) { if (p.length >= 4) map.roads.push({ p, w, k }); p = []; continue; }
+      p.push(x, y + wob());
+    }
+    if (p.length >= 4) map.roads.push({ p, w, k });
+  });
+  for (const side of [-1, 1]) {
+    const p = [];
+    for (let x = 0; x <= W; x += 20) p.push(x, rc(x) + side * (rw(x) + 12));
+    map.roads.push({ p, w: 12, k: 'major', name: side < 0 ? 'North Quay' : 'South Quay' });
+  }
+  const rail = [];
+  for (let x = 0; x <= W; x += 30) rail.push(x, ry(x));
+  map.roads.push({ p: rail, w: 5, k: 'rail' });
+  const path = [];
+  for (let x = 0; x <= W; x += 18) path.push(x, rc(x) - rw(x) - 22 + Math.sin(x / 40) * 2);
+  map.roads.push({ p: path, w: 3, k: 'path' });
+
+  const specialUses = { civic: ['Police Station', 'Fire Station', 'Town Hall', 'Courthouse'], trade: ['Supermarket', 'Market Hall', 'Department Store'],
+                        armory: ['Armory', 'Barracks'], rescue: ['Hospital', 'Clinic', 'Red Cross Depot'], hazard: ['Fuel Depot', 'Gas Works', 'Chemical Plant'] };
+  const pickKind = (dist, nearWater) => {
+    const r = rng.next();
+    if (r < 0.012) return 'civic';
+    if (r < 0.032) return 'trade';
+    if (r < 0.038) return 'armory';
+    if (r < 0.046) return 'rescue';
+    if (r < 0.052) return 'hazard';
+    if (r < 0.07) return 'landmark';
+    if (nearWater && r < 0.3) return 'ind';
+    if (dist < 0.22 && r < 0.6) return 'com';
+    if (r < 0.2) return 'com';
+    if (r < 0.26) return 'ind';
+    return 'res';
+  };
+  const heightAt = d => {
+    if (d < 0.12) return 30 + rng.next() * 120 * (1 - d / 0.12) + rng.next() * 20;
+    if (d < 0.26) return 12 + rng.next() * 26;
+    if (d < 0.42) return 7 + rng.next() * 12;
+    return 4 + rng.next() * 7;
+  };
+  const addB = (p, d, nearW) => {
+    for (let k = 0; k < p.length; k += 2) if (nearRiver(p[k], p[k + 1], 14) || nearRail(p[k], p[k + 1], 9) || p[k] < 2 || p[k + 1] < 2 || p[k] > W - 2 || p[k + 1] > H - 2) return;
+    const kind = pickKind(d, nearW);
+    const b = { p, h: Math.round(heightAt(d) * 10) / 10, k: kind, use: '' };
+    if (specialUses[kind]) { b.use = rng.pick(specialUses[kind]); b.h = Math.max(b.h, 9); }
+    else b.use = { res: 'Housing', com: 'Offices', ind: 'Warehouse', landmark: 'Landmark' }[kind];
+    map.buildings.push(b);
+  };
+  const lots = (x0, y0, x1, y1, d) => {
+    const depth = Math.min(rng.range(13, 24), (y1 - y0) / 2 - 1, (x1 - x0) / 2 - 1);
+    if (depth < 6) return;
+    const nearW = nearRiver((x0 + x1) / 2, (y0 + y1) / 2, 110);
+    const run = (a, b, place) => { let s = a; while (s < b - 6) { const w = Math.min(rng.range(9, 23), b - s); if (b - s - w < 6) { place(s, b); break; } place(s, s + w); s += w; } };
+    run(x0, x1, (a, b) => { const dd = depth * rng.range(0.7, 1); addB([a + 0.7, y0, b - 0.7, y0, b - 0.7, y0 + dd, a + 0.7, y0 + dd], d, nearW); });
+    run(x0, x1, (a, b) => {
+      const dd = depth * rng.range(0.7, 1);
+      if (rng.chance(0.22) && b - a > 14) { const m = (a + b) / 2; addB([a + 0.7, y1 - dd, m, y1 - dd, m, y1 - dd * 0.55, b - 0.7, y1 - dd * 0.55, b - 0.7, y1, a + 0.7, y1], d, nearW); }
+      else addB([a + 0.7, y1 - dd, b - 0.7, y1 - dd, b - 0.7, y1, a + 0.7, y1], d, nearW);
+    });
+    run(y0 + depth + 1, y1 - depth - 1, (a, b) => { const dd = depth * rng.range(0.7, 1); addB([x0, a + 0.7, x0 + dd, a + 0.7, x0 + dd, b - 0.7, x0, b - 0.7], d, nearW); });
+    run(y0 + depth + 1, y1 - depth - 1, (a, b) => { const dd = depth * rng.range(0.7, 1); addB([x1 - dd, a + 0.7, x1, a + 0.7, x1, b - 0.7, x1 - dd, b - 0.7], d, nearW); });
+  };
+  for (let i = -1; i < xs.length; i++) for (let j = -1; j < ys.length; j++) {
+    const ax = i < 0 ? 0 : xs[i], bx = i + 1 < xs.length ? xs[i + 1] : W;
+    const ay = j < 0 ? 0 : ys[j], by = j + 1 < ys.length ? ys[j + 1] : H;
+    const ia = (i < 0 ? 0 : major(i) ? 7.5 : 4.5) + 3, ib = (i + 1 < xs.length ? (major(i + 1) ? 7.5 : 4.5) : 0) + 3;
+    const ja = (j < 0 ? 0 : major(j) ? 7.5 : 4.5) + 3, jb = (j + 1 < ys.length ? (major(j + 1) ? 7.5 : 4.5) : 0) + 3;
+    const x0 = ax + ia, x1 = bx - ib, y0 = ay + ja, y1 = by - jb;
+    if (x1 - x0 < 20 || y1 - y0 < 20) continue;
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    const d = Math.hypot(mx - cx, my - cy) / W;
+    const r = rng.next();
+    if (r < 0.06 && d > 0.06) {
+      const park = [x0 + 2, y0 + 2, x1 - 2, y0 + 2, x1 - 2, y1 - 2, x0 + 2, y1 - 2];
+      if (![0, 1, 2, 3].some(k => nearRiver(park[k * 2], park[k * 2 + 1], 4))) {
+        map.parks.push({ p: park });
+        if (r < 0.025 && x1 - x0 > 60 && y1 - y0 > 60) {
+          const pond = [], R = Math.min(x1 - x0, y1 - y0) * 0.28;
+          for (let a = 0; a < 18; a++) { const t = a / 18 * Math.PI * 2, rr = R * (0.8 + 0.3 * Math.sin(t * 3 + seed)); pond.push(mx + Math.cos(t) * rr * 1.2, my + Math.sin(t) * rr); }
+          map.water.push({ p: pond });
+        }
+        continue;
+      }
+    }
+    if (d < 0.1 && rng.chance(0.7)) {
+      const n = rng.int(1, 3);
+      for (let t = 0; t < n; t++) {
+        const fx = x0 + (x1 - x0) * (t / n) + 3, gx = x0 + (x1 - x0) * ((t + 1) / n) - 3;
+        const inset = rng.range(4, 14);
+        addB([fx, y0 + inset, gx, y0 + inset, gx, y1 - inset, fx, y1 - inset], d * 0.6, false);
+      }
+      continue;
+    }
+    if (nearRiver(mx, my, 160) && rng.chance(0.35)) {
+      addB([x0 + 4, y0 + 4, x1 - 4, y0 + 4, x1 - 4, my - 3, x0 + 4, my - 3], 0.5, true);
+      addB([x0 + 4, my + 3, x1 - 4, my + 3, x1 - 4, y1 - 4, x0 + 4, y1 - 4], 0.5, true);
+      continue;
+    }
+    lots(x0, y0, x1, y1, d);
+  }
+
+  const ring = (R) => {
+    const p = [];
+    for (let a = 0; a < 14; a++) {
+      const t = a / 14 * Math.PI * 2, rr = R * (0.88 + 0.22 * rng.next());
+      p.push(clamp(cx + Math.cos(t) * rr * 1.12, 6, W - 6), clamp(cy + Math.sin(t) * rr, 6, H - 6));
+    }
+    return p;
+  };
+  const radii = size < 2000 ? [0.15, 0.27] : [0.11, 0.19, 0.3];
+  radii.forEach((f, i) => map.levels.push({ p: ring(W * f), label: 'Stage ' + (i + 1) }));
+  map.levels.push({ p: [2, 2, W - 2, 2, W - 2, H - 2, 2, H - 2], label: 'Whole city' });
+  return map;
+}
+
+// ---------- stand-in grid for the damage test (js/sim/raster.js replaces it when present) ----------
+function specimenGrid(map, cell = 4) {
+  const gw = Math.ceil(map.w / cell), gh = Math.ceil(map.h / cell);
+  const terrain = new Uint8Array(gw * gh), bldg = new Int32Array(gw * gh), bridgeId = new Int16Array(gw * gh);
+  for (const o of map.parks) rasterPoly(o.p, cell, gw, gh, i => { terrain[i] = 5; });
+  for (const o of map.water) rasterPoly(o.p, cell, gw, gh, i => { terrain[i] = 3; });
+  const bridges = [];
+  for (const r of map.roads) {
+    if (r.k === 'bridge') {
+      const cells = [];
+      const id = bridges.length + 1;
+      rasterPolyline(r.p, r.w, cell, gw, gh, i => { if (terrain[i] === 3) { terrain[i] = 4; bridgeId[i] = id; cells.push(i); } });
+      bridges.push({ cells: Int32Array.from(cells) });
+    } else {
+      rasterPolyline(r.p, r.w, cell, gw, gh, i => { if (terrain[i] !== 3 && terrain[i] !== 4) terrain[i] = r.k === 'rail' ? 7 : 1; });
+    }
+  }
+  const bInfo = map.buildings.map((b, bi) => {
+    const cells = [];
+    rasterPoly(b.p, cell, gw, gh, i => { terrain[i] = 2; bldg[i] = bi + 1; cells.push(i); });
+    return { cells: Int32Array.from(cells), h: b.h, k: b.k };
+  });
+  return { cell, gw, gh, terrain, bldg, bridgeId, bInfo, bridges };
+}
+
+// ---------- state ----------
+const canvas = document.getElementById('mapCanvas');
+const view = document.getElementById('mapView');
+const ctx = canvas.getContext('2d');
+const mini = document.getElementById('mini');
+const mctx = mini.getContext('2d');
+const tip = document.getElementById('tip');
+const cam = new Camera({ maxZoom: 14 });
+const S = { map: null, grid: null, palette: 'paper', view: 'normal', stage: 0, dim: true, all: false, hover: -1, seed: 4242, size: 2600, source: 'specimen', dirty: true, buildGrid: specimenGrid, generateCity: null };
+let dpr = 1;
+const panTimes = [];
+
+async function loadOptional() {
+  try {
+    const m = await import('./js/sim/raster.js');
+    if (typeof m.buildGrid === 'function') S.buildGrid = m.buildGrid;
+  } catch (e) { /* stand-in grid stays */ }
+  try {
+    const m = await import('./js/map/citygen.js');
+    if (typeof m.generateCity === 'function') {
+      S.generateCity = m.generateCity;
+      const sel = document.getElementById('citySel');
+      const group = document.createElement('optgroup');
+      group.label = 'citygen.js';
+      for (const [v, t] of [['gen:river:2', 'River · 2 km'], ['gen:coast:3', 'Coast · 3 km'], ['gen:islands:2.5', 'Islands · 2.5 km'], ['gen:lake:4', 'Lake · 4 km']]) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = t;
+        group.appendChild(o);
+      }
+      sel.appendChild(group);
+    }
+  } catch (e) { /* specimen cities only */ }
+}
+
+function makeCity() {
+  if (S.source.startsWith('gen:') && S.generateCity) {
+    const [, water, km] = S.source.split(':');
+    return S.generateCity({ seed: S.seed, sizeKm: +km, water, density: 0.7, stages: 5 });
+  }
+  return specimenCity(S.seed, S.size);
+}
+
+function build() {
+  const t0 = performance.now();
+  S.map = makeCity();
+  const t1 = performance.now();
+  S.grid = S.buildGrid(S.map, 4);
+  const t2 = performance.now();
+  makeStaticCache(S.map, S.grid);
+  const t3 = performance.now();
+  cam.setMap(S.map);
+  fitStage(false);
+  S.stage = Math.min(S.stage, S.map.levels.length - 1);
+  renderStageSeg();
+  document.getElementById('cityStats').textContent = `${S.map.buildings.length.toLocaleString()} buildings, ${S.map.roads.length} roads; gen ${Math.round(t1 - t0)} ms, grid ${Math.round(t2 - t1)} ms, index ${Math.round(t3 - t2)} ms`;
+  document.getElementById('mapForm').textContent = `${S.map.name || 'Specimen'} · seed ${S.seed} · ${(S.map.w / 1000).toFixed(1)} km sheet`;
+  renderPresets();
+  S.dirty = true;
+}
+
+function fitStage(smooth = true) {
+  const lv = S.map.levels[S.stage];
+  const bb = lv ? polyBBox(lv.p) : [0, 0, S.map.w, S.map.h];
+  if (smooth) cam.fitSmooth(bb, 30, 0.45); else cam.fit(bb, cam.w, cam.h, 30);
+}
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const r = view.getBoundingClientRect();
+  canvas.width = Math.round(r.width * dpr);
+  canvas.height = Math.round(r.height * dpr);
+  cam.resize(r.width, r.height);
+  const mr = mini.getBoundingClientRect();
+  mini.width = Math.round(mr.width * dpr);
+  mini.height = Math.round(mr.height * dpr);
+  S.dirty = true;
+}
+
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const res = drawStatic(ctx, S.map, S.grid, cam, { palette: S.palette, view: S.view, stageMask: S.stage, dimOutside: S.dim, allStages: S.all, hover: S.hover >= 0 ? S.hover : null });
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawScaleBar(ctx, cam, { palette: S.palette, x: 16, y: cam.h - 14 });
+  mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawMinimap(mctx, S.map, mini.width / dpr, mini.height / dpr, { palette: S.palette, stage: S.stage, camera: cam, grid: S.grid });
+  return res;
+}
+
+let last = performance.now(), lastVer = -1, pfTick = 0;
+function loop(t) {
+  const dt = Math.min(0.05, (t - last) / 1000);
+  last = t;
+  const moved = cam.update(dt);
+  if (moved || S.dirty || cam.version !== lastVer || S.pending) {
+    const res = draw();
+    S.pending = res.pending > 0;
+    S.dirty = false;
+    lastVer = cam.version;
+    if (!res.rendered) { panTimes.push(res.ms); if (panTimes.length > 60) panTimes.shift(); }
+    if (++pfTick % 6 === 0) {
+      document.getElementById('pfDraw').textContent = res.ms.toFixed(2) + ' ms';
+      if (panTimes.length) document.getElementById('pfPan').textContent = (panTimes.reduce((a, b) => a + b, 0) / panTimes.length).toFixed(2) + ' ms';
+      const cache = getStaticCache(S.map);
+      document.getElementById('pfTiles').textContent = `${cache.stats.tiles} (${res.pending} pending)`;
+      document.getElementById('pfZoom').textContent = cam.zoom.toFixed(3) + ' px/m';
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------- input ----------
+let drag = null;
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  drag = { x: e.offsetX, y: e.offsetY, moved: 0 };
+  view.classList.add('dragging');
+});
+canvas.addEventListener('pointermove', e => {
+  const sx = e.offsetX, sy = e.offsetY;
+  if (drag) {
+    const dx = sx - drag.x, dy = sy - drag.y;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    drag.x = sx; drag.y = sy;
+    cam.pan(dx, dy);
+    tip.hidden = true;
+    return;
+  }
+  const [wx, wy] = cam.screenToWorld(sx, sy);
+  document.getElementById('coords').textContent = `E ${wx.toFixed(0).padStart(4, '0')}  S ${wy.toFixed(0).padStart(4, '0')}`;
+  const b = pickBuilding(S.map, wx, wy);
+  const br = b < 0 ? pickBridge(S.map, wx, wy) : null;
+  if (b !== S.hover) { S.hover = b; S.dirty = true; }
+  if (b >= 0) {
+    const B = S.map.buildings[b];
+    tip.innerHTML = `<div class="tooltip-title">${B.use || B.k}</div><div class="tooltip-sub">${B.k} · no. ${b}</div>
+      <div class="kv"><span>Height</span><i></i><b>${B.h.toFixed(1)} m</b></div>
+      <div class="kv"><span>Footprint</span><i></i><b>${Math.round(polyArea(B.p)).toLocaleString()} m²</b></div>`;
+    tip.hidden = false;
+  } else if (br) {
+    const R = S.map.roads[br.road];
+    tip.innerHTML = `<div class="tooltip-title">${R.name || 'Bridge'}</div><div class="tooltip-sub">Road over water</div>
+      <div class="kv"><span>Structural integrity</span><i></i><b>${br.alive ? '100%' : '0%'}</b></div>`;
+    tip.hidden = false;
+  } else tip.hidden = true;
+  if (!tip.hidden) {
+    const r = view.getBoundingClientRect();
+    tip.style.left = Math.min(sx + 16, r.width - 240) + 'px';
+    tip.style.top = Math.min(sy + 16, r.height - 90) + 'px';
+  }
+});
+const endDrag = () => { drag = null; view.classList.remove('dragging'); };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerleave', () => { tip.hidden = true; if (S.hover !== -1) { S.hover = -1; S.dirty = true; } });
+canvas.addEventListener('wheel', e => { e.preventDefault(); cam.wheel(e.deltaY, e.offsetX, e.offsetY, e.deltaMode); }, { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+mini.addEventListener('pointerdown', e => {
+  const r = mini.getBoundingClientRect();
+  const T = drawMinimap(mctx, S.map, r.width, r.height, { palette: S.palette, stage: S.stage, camera: cam });
+  const [wx, wy] = T.toWorld(e.clientX - r.left, e.clientY - r.top);
+  cam.flyTo(wx, wy, cam.zoom, 0.35);
+});
+window.addEventListener('keydown', e => {
+  if (e.target.closest('input, textarea, select')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'v') setView(S.view === 'height' ? 'normal' : 'height');
+  else if (k === 'c') setView(S.view === 'specials' ? 'normal' : 'specials');
+  else if (e.key === 'Home') fitStage(true);
+  else if (/^[1-7]$/.test(e.key) && +e.key <= S.map.levels.length) setStage(+e.key - 1);
+  else if (e.key === 'Escape') toggleModal(document.getElementById('modal').hidden);
+  else return;
+  e.preventDefault();
+});
+const keysDown = new Set();
+window.addEventListener('keydown', e => { if (!e.target.closest('input, textarea, select')) keysDown.add(e.key.toLowerCase()); });
+window.addEventListener('keyup', e => keysDown.delete(e.key.toLowerCase()));
+setInterval(() => {
+  const sp = 14;
+  let dx = 0, dy = 0;
+  if (keysDown.has('a') || keysDown.has('arrowleft')) dx += sp;
+  if (keysDown.has('d') || keysDown.has('arrowright')) dx -= sp;
+  if (keysDown.has('w') || keysDown.has('arrowup')) dy += sp;
+  if (keysDown.has('s') || keysDown.has('arrowdown')) dy -= sp;
+  if (dx || dy) cam.pan(dx, dy);
+}, 16);
+
+// ---------- side panel ----------
+function setView(v) {
+  S.view = v;
+  for (const b of document.querySelectorAll('#viewSeg button')) b.classList.toggle('is-on', b.dataset.view === v);
+  S.dirty = true;
+}
+function setStage(i) {
+  S.stage = i;
+  renderStageSeg();
+  fitStage(true);
+  S.dirty = true;
+}
+function renderStageSeg() {
+  const seg = document.getElementById('stageSeg');
+  seg.innerHTML = S.map.levels.map((lv, i) => `<button data-st="${i}" class="${i === S.stage ? 'is-on' : ''}">${i + 1}</button>`).join('');
+}
+document.getElementById('stageSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setStage(+b.dataset.st); });
+document.getElementById('viewSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
+document.getElementById('dimT').addEventListener('change', e => { S.dim = e.target.checked; S.dirty = true; });
+document.getElementById('allT').addEventListener('change', e => { S.all = e.target.checked; S.dirty = true; });
+document.getElementById('citySel').addEventListener('change', e => {
+  const v = e.target.value;
+  if (v.startsWith('gen:')) S.source = v; else { S.source = 'specimen'; S.size = +v; }
+  S.stage = 0;
+  build();
+});
+document.getElementById('regen').addEventListener('click', () => { S.seed = (S.seed * 1103515245 + 12345) % 99991; build(); });
+
+function collapse(n) {
+  const g = S.grid, map = S.map;
+  const [x0, y0, x1, y1] = cam.visibleBBox(-40);
+  const rng = new Rng(performance.now() | 0);
+  const cand = [];
+  map.buildings.forEach((b, i) => { const c = g.bInfo[i]; if (!c.cells.length) return; const cc = c.cells[0], X = (cc % g.gw) * g.cell, Y = Math.floor(cc / g.gw) * g.cell; if (X > x0 && X < x1 && Y > y0 && Y < y1 && g.terrain[cc] === 2) cand.push(i); });
+  rng.shuffle(cand);
+  for (const i of cand.slice(0, n)) {
+    const b = map.buildings[i], info = g.bInfo[i];
+    for (const c of info.cells) g.terrain[c] = 6;
+    const bb = polyBBox(b.p), mx = (bb[0] + bb[2]) / 2, my = (bb[1] + bb[3]) / 2;
+    const a = rng.range(0, Math.PI * 2), L = b.h * 0.9;
+    const wdt = Math.min(bb[2] - bb[0], bb[3] - bb[1]);
+    rasterPolyline([mx, my, mx + Math.cos(a) * L, my + Math.sin(a) * L], wdt, g.cell, g.gw, g.gh, c => { if (g.terrain[c] !== 3 && g.terrain[c] !== 4) g.terrain[c] = 6; });
+    invalidateBuilding(map, i);
+  }
+  S.dirty = true;
+}
+function dropBridge() {
+  const g = S.grid;
+  const alive = g.bridges.map((b, i) => i).filter(i => g.bridges[i].cells.length && g.terrain[g.bridges[i].cells[0]] === 4);
+  if (!alive.length) return;
+  const [cx, cy] = [cam.cx, cam.cy];
+  alive.sort((a, b) => {
+    const ca = g.bridges[a].cells[0], cb = g.bridges[b].cells[0];
+    return Math.hypot((ca % g.gw) * 4 - cx, Math.floor(ca / g.gw) * 4 - cy) - Math.hypot((cb % g.gw) * 4 - cx, Math.floor(cb / g.gw) * 4 - cy);
+  });
+  const id = alive[0];
+  for (const c of g.bridges[id].cells) g.terrain[c] = 3;
+  invalidateBridge(S.map, id);
+  S.dirty = true;
+}
+document.getElementById('collapseB').addEventListener('click', () => collapse(15));
+document.getElementById('bridgeB').addEventListener('click', dropBridge);
+document.getElementById('restoreB').addEventListener('click', () => { S.grid = S.buildGrid(S.map, 4); S.dirty = true; });
+
+function renderLegend() {
+  const pal = getPalette(S.palette), a = pal.agent;
+  const rows = [['Civilian', a.civ], ['Panicked', a.civPanic], ['Zombie', a.zombie], ['Turning', a.turning], ['Explosive', a.explosive], ['Shielded', a.shielded],
+                ['Swimmer', a.swimmer], ['Giant', a.giant], ['Police', a.police], ['Militia', a.militia], ['Soldier', a.soldier], ['Zone wall', pal.zone.wall]];
+  document.getElementById('legend').innerHTML = rows.map(([n, c]) => `<div class="lg-row"><span class="lg-dot" style="background:${c};border:1px solid ${pal.ink2}"></span>${n}</div>`).join('');
+  document.getElementById('ramp').innerHTML = pal.heights.map(h => `<span title="${h.label}" style="background:${h.color}"></span>`).join('');
+}
+
+function setPalette(name) {
+  S.palette = name;
+  applyPalette(name);
+  for (const b of document.querySelectorAll('#palSeg button')) b.classList.toggle('is-on', b.dataset.pal === name);
+  renderLegend();
+  renderChips();
+  S.dirty = true;
+}
+document.getElementById('palSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setPalette(b.dataset.pal); });
+
+function renderPresets() {
+  for (const c of document.querySelectorAll('canvas[data-preset]')) {
+    const r = c.getBoundingClientRect();
+    c.width = Math.round(r.width * dpr);
+    c.height = Math.round(r.height * dpr);
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pc = new Camera({ w: r.width, h: r.height, maxZoom: 14 });
+    pc.setMap(S.map);
+    const lv = S.map.levels[0];
+    const bb = polyBBox(lv.p);
+    pc.centerOn((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2, 1.1);
+    drawStatic(g, S.map, S.grid, pc, { palette: c.dataset.preset, view: 'normal', stageMask: 0, frame: false, budgetMs: 1000 });
+  }
+}
+
+function renderChips() {
+  const cs = getComputedStyle(document.documentElement);
+  const chip = (t, n) => `<div class="chip-c"><i style="--sw:var(${t})"></i><div><b>${n}</b>${t}<br>${cs.getPropertyValue(t).trim()}</div></div>`;
+  document.getElementById('chipsBase').innerHTML = [['--paper', 'Paper'], ['--paper-2', 'Panel'], ['--card', 'Index card'], ['--manila', 'Manila'], ['--desk', 'Desk'], ['--ink', 'Ink'], ['--ink-2', 'Ink 2'], ['--ink-3', 'Faint rule']].map(([t, n]) => chip(t, n)).join('');
+  document.getElementById('chipsSignal').innerHTML = [['--stamp', 'Stamp red'], ['--approve', 'Approval'], ['--carbon', 'Carbon'], ['--safety', 'Safety'], ['--amber', 'Corridor'], ['--bronze', 'Bronze'], ['--gold', 'Gold'], ['--diamond', 'Diamond']].map(([t, n]) => chip(t, n)).join('');
+  document.getElementById('chipsMap').innerHTML = [['--map-road', 'Road'], ['--map-casing', 'Casing'], ['--map-bldg', 'Building'], ['--map-water', 'Water'], ['--map-park', 'Park'], ['--ag-civ', 'Civilian'], ['--ag-zombie', 'Zombie'], ['--ag-soldier', 'Soldier']].map(([t, n]) => chip(t, n)).join('');
+}
+
+function toggleModal(open) { document.getElementById('modal').hidden = !open; }
+document.getElementById('openModal').addEventListener('click', () => toggleModal(true));
+document.getElementById('closeModal').addEventListener('click', () => toggleModal(false));
+document.getElementById('resume').addEventListener('click', () => toggleModal(false));
+document.getElementById('modal').addEventListener('click', e => { if (e.target.id === 'modal') toggleModal(false); });
+const f5 = document.getElementById('f5');
+f5.addEventListener('input', () => { document.getElementById('f5v').textContent = f5.value + '%'; });
+document.getElementById('tickTrack').innerHTML += document.getElementById('tickTrack').innerHTML;
+
+// ---------- automation / benchmarking handle ----------
+window.__sg = {
+  S, cam,
+  get cache() { return getStaticCache(S.map); },
+  draw,
+  setPalette, setView, setStage, collapse, dropBridge,
+  setSize(v) { S.source = 'specimen'; S.size = v; S.stage = 0; build(); },
+  setSource(v) { S.source = v; S.stage = 0; build(); },
+  // Pans in small steps with a warm cache and returns per-frame static draw times (ms).
+  benchPan(steps = 120, dx = 9, dy = 4) {
+    draw();
+    for (let i = 0; i < 40 && draw().pending; i++);
+    const times = [];
+    for (let i = 0; i < steps; i++) {
+      cam.pan(i % 60 < 30 ? dx : -dx, i % 40 < 20 ? dy : -dy);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const t0 = performance.now();
+      const r = drawStatic(ctx, S.map, S.grid, cam, { palette: S.palette, view: S.view, stageMask: S.stage, dimOutside: S.dim });
+      times.push(performance.now() - t0);
+    }
+    times.sort((a, b) => a - b);
+    return { avg: times.reduce((a, b) => a + b, 0) / times.length, p50: times[times.length >> 1], p95: times[Math.floor(times.length * 0.95)], max: times[times.length - 1] };
+  },
+};
+
+await loadOptional();
+resize();
+build();
+window.addEventListener('resize', () => { resize(); renderPresets(); });
+setPalette('paper');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
