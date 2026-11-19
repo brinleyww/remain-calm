@@ -2,7 +2,8 @@
 import { T } from '../map/format.js';
 import { updatePassCells, nearestPassable, P_CIV } from './nav.js';
 import { M_ALL, M_HUMAN, M_ZOMBIE, M_TURNING, M_CIV, M_ARMED, CIV, ZOMBIE, TURNING, MILITIA, POLICE, ZSUB, CS,
-  damageAgent, removeAgent, spawnAgent, setType, cureAgent, evacuateAgent, armedStats, MILITIA_GROUP } from './agents.js';
+  damageAgent, removeAgent, spawnAgent, setType, cureAgent, evacuateAgent, armedStats, MILITIA_GROUP, TIER_SURFACE, TIER_ALL } from './agents.js';
+import { LV_DECK, nodeAt, surfaceAt } from './decks.js';
 import { ignite } from './fire.js';
 import { buildingInZone } from './zones.js';
 
@@ -18,7 +19,11 @@ export function initStructures(world) {
       special: !!world.cfg.specials[info.k], r: Math.sqrt(info.area / Math.PI) + g.cell * 0.5,
     };
   });
-  world.bridges = g.bridges.map((br, idx) => ({ idx, cx: br.cx, cy: br.cy, len: br.len, width: br.width, hp: br.hpMax, hpMax: br.hpMax, alive: true }));
+  world.bridges = g.bridges.map((br, idx) => {
+    const o = { idx, cx: br.cx, cy: br.cy, len: br.len, width: br.width, hp: br.hpMax, hpMax: br.hpMax, alive: true };
+    if (br.deck) { o.deck = true; o.bb = br.bb; o.road = br.road; o.tier = br.tier; }
+    return o;
+  });
   world.bcMask = new Uint8Array(world.nav.cN);
   world._bcCells = [];
   world._cq = [];
@@ -68,7 +73,7 @@ function doCollapse(world, b, dirX, dirY, src) {
   const L = info.h * bc.toppleRange;
   const steps = Math.max(0, Math.round(L / cs));
   const changed = [], marked = [];
-  const hitB = new Set(), hitBr = new Set();
+  const hitB = new Set(), hitBr = new Set(), dk = g.deck;
   for (const c of info.cells) if (terr[c] === T.BLDG) { terr[c] = T.RUBBLE; changed.push(c); }
   for (const c of info.cells) {
     const x = (c % gw + 0.5) * cs, y = (((c / gw) | 0) + 0.5) * cs;
@@ -77,7 +82,9 @@ function doCollapse(world, b, dirX, dirY, src) {
       if (cx < 0 || cy < 0 || cx >= gw || cy >= gh) break;
       const t = cy * gw + cx;
       if (g.bldg[t] === b + 1) continue;
+      if (dk && (dk.lvf[t] & LV_DECK)) for (let z = 1; z <= 3; z++) { const f = nodeAt(dk, z, cx, cy); if (f >= 0 && dk.sid[f - dk.N] >= 0) hitBr.add(dk.sid[f - dk.N]); }
       const tt = terr[t];
+      if (tt === T.RAMP) continue;
       if (tt === T.BLDG) { hitB.add(g.bldg[t] - 1); break; }
       if (tt === T.WATER) break;
       if (tt === T.BRIDGE) { hitBr.add(g.bridgeId[t] - 1); continue; }
@@ -91,7 +98,7 @@ function doCollapse(world, b, dirX, dirY, src) {
   world.query(bd.cx + dirX * L * 0.5, bd.cy + dirY * L * 0.5, reach, M_ALL, (i) => {
     const c = Math.floor(A.y[i] / cs) * gw + Math.floor(A.x[i] / cs);
     if (crush[c] || g.bldg[c] === b + 1) victims.push(i);
-  });
+  }, 0);
   for (const i of victims) killOutright(world, i, src);
   for (const t of marked) crush[t] = 0;
   updatePassCells(world, changed);
@@ -116,7 +123,7 @@ function doCollapse(world, b, dirX, dirY, src) {
   }
 }
 
-function killOutright(world, i, src) {
+export function killOutright(world, i, src) {
   const A = world.A, t = A.type[i];
   if (!t) return;
   if (t === ZOMBIE) { A.shield[i] = 0; damageAgent(world, i, 1e9, src); return; }
@@ -132,6 +139,7 @@ export function damageBridge(world, id, dmg) {
   br.hp -= dmg;
   if (br.hp > 0) return false;
   br.hp = 0; br.alive = false;
+  if (br.deck) { deckDown(world, id); return true; }
   const g = world.grid, cells = g.bridges[id].cells, cs = g.cell;
   for (const c of cells) g.terrain[c] = T.WATER;
   updatePassCells(world, cells);
@@ -140,13 +148,49 @@ export function damageBridge(world, id, dmg) {
     if (A.type[i] === ZOMBIE && A.sub[i] === ZSUB.SWIMMER) return;
     const c = Math.floor(A.y[i] / cs) * g.gw + Math.floor(A.x[i] / cs);
     if (g.bridgeId[c] === id + 1) victims.push(i);
-  });
+  }, 0);
   for (const i of victims) killOutright(world, i, 'drown');
   world.effects.push({ kind: 'splash', x: br.cx, y: br.cy, r: br.len * 0.5, t0: world.t, dur: 1.5 });
   world.events.emit('bridgeDown', { id });
   world.events.emit('log', { msg: 'BRIDGE DOWN', kind: 'warn', x: br.cx, y: br.cy });
   world.events.emit('sound', { name: 'collapse', x: br.cx, y: br.cy, vol: 0.9 });
   return true;
+}
+
+// A deck piece gives way: its nodes close, the people on it fall (swimmers over water drop into it), and the land
+// under it turns to rubble.
+function deckDown(world, id) {
+  const g = world.grid, dk = g.deck, gb = g.bridges[id], br = world.bridges[id], cs = g.cell, A = world.A;
+  updatePassCells(world, gb.nodes);
+  const victims = [], swim = [];
+  world.query(br.cx, br.cy, Math.hypot(gb.bb[2] - gb.bb[0], gb.bb[3] - gb.bb[1]) * 0.5 + cs * 2, M_ALL, (i) => {
+    const t = A.tier[i];
+    if (t <= 0) return;
+    const f = nodeAt(dk, t, Math.floor(A.x[i] / cs), Math.floor(A.y[i] / cs));
+    if (f < 0 || dk.sid[f - dk.N] !== id) return;
+    if (A.type[i] === ZOMBIE && A.sub[i] === ZSUB.SWIMMER && dk.over[f - dk.N]) swim.push(i); else victims.push(i);
+  });
+  for (const i of swim) A.tier[i] = 0;
+  for (const i of victims) killOutright(world, i, 'fall');
+  const changed = [];
+  for (const c of gb.cells) {
+    const t = g.terrain[c];
+    if (t === T.OPEN || t === T.ROAD || t === T.PARK || t === T.RAIL) { g.terrain[c] = T.RUBBLE; changed.push(c); }
+  }
+  if (changed.length) updatePassCells(world, changed);
+  world.effects.push({ kind: 'collapse', x: br.cx, y: br.cy, r: Math.max(br.width, br.len * 0.5), t0: world.t, dur: 1.4, x2: br.cx, y2: br.cy });
+  world.events.emit('bridgeDown', { id, deck: true });
+  world.events.emit('log', { msg: 'OVERPASS DOWN', kind: 'warn', x: br.cx, y: br.cy });
+  world.events.emit('sound', { name: 'collapse', x: br.cx, y: br.cy, vol: 0.9 });
+}
+
+// Which agents a blast reaches on a map with decks: a small blast only its own tier (where it went off, else the top
+// surface at the point), a big one the ground and every deck; tunnels only from inside, or a blast with allTiers.
+function blastTier(world, x, y, r, o) {
+  if (o.allTiers) return TIER_ALL;
+  const t = o.tier ?? surfaceAt(world, x, y);
+  if (t < 0 || r < ((world.cfg.decks && world.cfg.decks.bigBlastR) || 24)) return t;
+  return TIER_SURFACE;
 }
 
 // ---------------------------------------------------------------- walls / gates
@@ -196,10 +240,11 @@ export function damageWallsArea(world, x, y, r, dmg) {
 export function damageArea(world, x, y, r, dmg, o = {}) {
   const src = o.src || 'explosion', fall = o.falloff !== false, stun = o.stunSec || 0;
   if (!(r > 0)) return;
+  const dk = world.grid.deck, tier = dk ? blastTier(world, x, y, r, o) : TIER_SURFACE, under = tier < 0;
   if (dmg > 0 || stun > 0) {
     const mask = M_ZOMBIE | M_TURNING | (o.friendly ? M_HUMAN : 0);
     const hits = [];
-    world.query(x, y, r, mask, (i, d2) => { hits.push(i, d2); });
+    world.query(x, y, r, mask, (i, d2) => { hits.push(i, d2); }, tier);
     const A = world.A;
     for (let k = 0; k < hits.length; k += 2) {
       const i = hits[k], f = fall ? 1 - 0.75 * Math.sqrt(hits[k + 1]) / r : 1;
@@ -208,7 +253,7 @@ export function damageArea(world, x, y, r, dmg, o = {}) {
       if (dmg > 0) damageAgent(world, i, dmg * f, src);
     }
   }
-  if (o.bldgDmg > 0) {
+  if (o.bldgDmg > 0 && !under) {
     for (const b of world.buildings) {
       if (!b.alive) continue;
       const dx = b.cx - x, dy = b.cy - y, d = Math.hypot(dx, dy);
@@ -217,9 +262,15 @@ export function damageArea(world, x, y, r, dmg, o = {}) {
       damageBuilding(world, b.idx, o.bldgDmg * f, src, dx, dy);
     }
   }
-  if (o.bridgeDmg > 0) {
+  if (o.bridgeDmg > 0 && !under) {
     for (const br of world.bridges) {
       if (!br.alive) continue;
+      if (br.deck) {
+        const b = br.bb, d = Math.hypot(Math.max(b[0] - x, 0, x - b[2]), Math.max(b[1] - y, 0, y - b[3]));
+        if (d > r) continue;
+        damageBridge(world, br.idx, o.bridgeDmg * (fall ? Math.max(0.25, 1 - 0.75 * d / r) : 1) * (o.explosive === false ? 1 : world.cfg.bridge.explosiveMul));
+        continue;
+      }
       const d = Math.hypot(br.cx - x, br.cy - y);
       if (d > r + br.len * 0.5) continue;
       const f = fall ? Math.max(0.25, 1 - 0.75 * Math.max(0, d - br.len * 0.5) / r) : 1;

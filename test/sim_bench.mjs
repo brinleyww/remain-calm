@@ -1,5 +1,6 @@
 // SIM performance benchmark: ~40k agents in battle. Usage: node test/sim_bench.mjs [--city] [--ticks N]
-// --city uses the procedural city generator (js/map/citygen.js) instead of the hand-made grid map.
+// --city uses the procedural city generator (js/map/citygen.js) instead of the hand-made grid map; add --flat for the
+// same city without its motorway (as generated before multi-level roads).
 import { World, TYPE } from '../js/sim/world.js';
 import { makeTestMap, blockRect } from './sim_testmap.mjs';
 
@@ -10,7 +11,7 @@ const useCity = args.includes('--city');
 let map, scale;
 if (useCity) {
   const { generateCity } = await import('../js/map/citygen.js');
-  map = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.8, stages: 5 });
+  map = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.8, stages: 5, motorways: !args.includes('--flat') });
   scale = 1.3;
 } else {
   map = makeTestMap({ size: 3000, river: true, stages: 5, seed: 99 });

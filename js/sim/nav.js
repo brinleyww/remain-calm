@@ -2,7 +2,10 @@
 // All fields live on the fine grid; the coarse grid (sim.coarse) is only used for fire and broadcast masks.
 // Field encoding: dist (Uint32, INF unreachable), dir (Uint8: 0..7 = step toward the target, 8 = target cell, 255 = unreachable).
 // Costs: 0 = blocked, low 7 bits = cost multiplier, BARRIER bit = wall or gate (no diagonal step may cut past it).
+// On maps with decks (grid.deck) every per-cell array and field also covers the deck and tunnel nodes: field ids
+// N + k after the N ground cells (see decks.js).
 import { T } from '../map/format.js';
+import { LV_DECK, LV_TUNNEL, LV_PORTAL, TIERS, nodeAt } from './decks.js';
 
 export const P_IN = 1, P_CIV = 2, P_ZOM = 4, P_SWIM = 8, P_SLOW = 16, P_WALL = 32, P_GATE = 64, P_WATER = 128;
 export const INF = 0xFFFFFFFF;
@@ -23,17 +26,18 @@ export class DialJob {
     this.dist = new Uint32Array(N);
     this.dir = new Uint8Array(N);
     this.nb = 0; this.mask = 0; this.buckets = [];
-    this.cost = null; this.cur = 0; this.pending = 0; this.active = false; this.maxD = INF;
+    this.cost = null; this.cur = 0; this.pending = 0; this.active = false; this.maxD = INF; this.layers = null;
     this.dist.fill(INF); this.dir.fill(255);
   }
 
-  begin(cost, maxCost, maxD = INF) {
+  // layers: grid.deck to expand over the deck and tunnel nodes too (cost and the field arrays then cover N + D ids)
+  begin(cost, maxCost, maxD = INF, layers = null) {
     let nb = 64;
     while (nb < 14 * maxCost + 1) nb <<= 1;
     if (nb !== this.nb) { this.nb = nb; this.mask = nb - 1; this.buckets = []; for (let i = 0; i < nb; i++) this.buckets.push([]); }
     else for (const b of this.buckets) b.length = 0;
     this.dist.fill(INF); this.dir.fill(255);
-    this.cost = cost; this.cur = 0; this.pending = 0; this.active = true; this.maxD = maxD;
+    this.cost = cost; this.cur = 0; this.pending = 0; this.active = true; this.maxD = maxD; this.layers = layers;
   }
 
   source(c) {
@@ -45,6 +49,7 @@ export class DialJob {
   // A diagonal step needs both side cells open and neither a barrier, so fields never slip between wall cells.
   run(budget) {
     if (!this.active) return true;
+    if (this.layers !== null) return this.runLayered(budget);
     const dist = this.dist, dir = this.dir, cost = this.cost, buckets = this.buckets, mask = this.mask, gw = this.gw, maxD = this.maxD;
     let cur = this.cur, pending = this.pending;
     while (pending > 0 && budget > 0) {
@@ -69,6 +74,63 @@ export class DialJob {
     if (pending === 0) { this.active = false; return true; }
     return false;
   }
+
+  // run() over ground cells and nodes: a ground cell with portals also relaxes the nodes they lead to (the ground
+  // cell in that direction is a ramp, so the compass dir still resolves to the node); a node relaxes its links.
+  runLayered(budget) {
+    const dist = this.dist, dir = this.dir, cost = this.cost, buckets = this.buckets, mask = this.mask, gw = this.gw, maxD = this.maxD;
+    const dk = this.layers, N = dk.N, lvf = dk.lvf, nbs = dk.nb, P = dk.portals, pnb = dk.pnb;
+    let cur = this.cur, pending = this.pending;
+    while (pending > 0 && budget > 0) {
+      const bk = buckets[cur & mask];
+      if (bk.length === 0) { cur++; if (cur > maxD) { for (const b of buckets) b.length = 0; pending = 0; break; } continue; }
+      const c = bk.pop(); pending--;
+      if (dist[c] !== cur) continue;
+      budget--;
+      let nd, n, k;
+      if (c >= N) {
+        const base = 8 * (c - N);
+        for (let d = 0; d < 8; d++) {
+          n = nbs[base + d];
+          if (n < 0) continue;
+          k = cost[n];
+          if (!k) continue;
+          if (d & 1) {
+            const sa = cost[nbs[base + d - 1]], sb = cost[nbs[base + ((d + 1) & 7)]];
+            if (!sa || sa >= BARRIER || !sb || sb >= BARRIER) continue;
+            nd = cur + 14 * (k & 127);
+          } else nd = cur + 10 * (k & 127);
+          if (nd < dist[n]) { dist[n] = nd; dir[n] = (d + 4) & 7; buckets[nd & mask].push(n); pending++; }
+        }
+        continue;
+      }
+      const ce = cost[c + 1], cw = cost[c - 1], cs = cost[c + gw], cn = cost[c - gw];
+      if (ce) { nd = cur + 10 * (ce & 127); if (nd < dist[c + 1]) { dist[c + 1] = nd; dir[c + 1] = 4; buckets[nd & mask].push(c + 1); pending++; } }
+      if (cw) { nd = cur + 10 * (cw & 127); if (nd < dist[c - 1]) { dist[c - 1] = nd; dir[c - 1] = 0; buckets[nd & mask].push(c - 1); pending++; } }
+      if (cs) { nd = cur + 10 * (cs & 127); if (nd < dist[c + gw]) { dist[c + gw] = nd; dir[c + gw] = 6; buckets[nd & mask].push(c + gw); pending++; } }
+      if (cn) { nd = cur + 10 * (cn & 127); if (nd < dist[c - gw]) { dist[c - gw] = nd; dir[c - gw] = 2; buckets[nd & mask].push(c - gw); pending++; } }
+      const okE = ce !== 0 && ce < BARRIER, okW = cw !== 0 && cw < BARRIER, okS = cs !== 0 && cs < BARRIER, okN = cn !== 0 && cn < BARRIER;
+      if (okE && okS) { n = c + gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 5; buckets[nd & mask].push(n); pending++; } } }
+      if (okW && okS) { n = c + gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 7; buckets[nd & mask].push(n); pending++; } } }
+      if (okW && okN) { n = c - gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 1; buckets[nd & mask].push(n); pending++; } } }
+      if (okE && okN) { n = c - gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 3; buckets[nd & mask].push(n); pending++; } } }
+      if (lvf[c] & LV_PORTAL) {
+        let lo = 0, hi = P.length - 1, p = -1;
+        while (lo <= hi) { const m = (lo + hi) >> 1; if (P[m] === c) { p = m; break; } if (P[m] < c) lo = m + 1; else hi = m - 1; }
+        for (let j = 0; p >= 0 && j < 4; j++) {
+          n = pnb[4 * p + j];
+          if (n < 0) continue;
+          k = cost[n];
+          if (!k) continue;
+          nd = cur + 10 * (k & 127);
+          if (nd < dist[n]) { dist[n] = nd; dir[n] = (2 * j + 4) & 7; buckets[nd & mask].push(n); pending++; }
+        }
+      }
+    }
+    this.cur = cur; this.pending = pending;
+    if (pending === 0) { this.active = false; return true; }
+    return false;
+  }
 }
 
 function makeField(N, gw) { return { dist: new Uint32Array(N).fill(INF), dir: new Uint8Array(N).fill(255), job: new DialJob(N, gw), dirty: true, last: -1e9, ready: false, urgent: true }; }
@@ -82,7 +144,7 @@ function swap(f) {
 
 export function initNav(world) {
   const g = world.grid, cfg = world.cfg;
-  const N = g.gw * g.gh;
+  const N0 = g.gw * g.gh, N = N0 + (g.deck ? g.deck.D : 0);
   const R = Math.max(1, Math.round((cfg.sim.coarse || 8) / g.cell));
   const cgw = Math.ceil(g.gw / R), cgh = Math.ceil(g.gh / R);
   const cN = cgw * cgh;
@@ -92,7 +154,7 @@ export function initNav(world) {
     civDyn: new Uint8Array(N), dynList: [],
     civ: makeField(N, g.gw), scent: makeField(N, g.gw), swim: null,
     version: 0, regionCells: 1, swimmers: 0, k: costConsts(cfg),
-    corrFields: [],
+    corrFields: [], N: N0, deck: g.deck || null,
   };
 }
 
@@ -109,7 +171,9 @@ export function swimField(world) {
 }
 
 export function passOf(world, c) {
-  const g = world.grid, gw = g.gw, X = c % gw, Y = (c / gw) | 0;
+  const g = world.grid, gw = g.gw;
+  if (c >= world.nav.N) return passOfNode(world, c);
+  const X = c % gw, Y = (c / gw) | 0;
   if (X === 0 || Y === 0 || X === gw - 1 || Y === g.gh - 1) return 0;
   if (!world.region.mask[c]) return 0;
   const t = g.terrain[c];
@@ -125,12 +189,24 @@ export function passOf(world, c) {
   return p;
 }
 
+// A node is open while its deck stands; the wall, gate and stage boundary of the ground cell under it apply to every tier.
+function passOfNode(world, f) {
+  const g = world.grid, dk = g.deck, k = f - world.nav.N, c = dk.cell[k], gw = g.gw, X = c % gw, Y = (c / gw) | 0;
+  if (X === 0 || Y === 0 || X === gw - 1 || Y === g.gh - 1 || !world.region.mask[c]) return 0;
+  const sid = dk.sid[k];
+  if (sid >= 0 && world.bridges && world.bridges[sid] && !world.bridges[sid].alive) return 0;
+  const blk = world.block[c];
+  if (blk !== 0 && world.wallHp[c] > 0) return P_IN | (blk === 3 ? (P_GATE | P_CIV) : P_WALL);
+  return P_IN | P_CIV | P_ZOM | P_SWIM;
+}
+
 // Writes pass bits and the three traversal costs (civilian, zombie, swimmer; 0 = blocked) of one cell.
 function setCell(nav, terrain, c, p) {
   const k = nav.k;
   nav.pass[c] = p;
-  nav.under[c] = p ? UNDER[terrain[c]] : 0;
-  const land = (p & P_SLOW) ? k.rubble : terrain[c] === T.PARK ? k.park : 1;
+  const node = c >= nav.N;
+  nav.under[c] = p && !node ? UNDER[terrain[c]] : 0;
+  const land = (p & P_SLOW) ? k.rubble : !node && terrain[c] === T.PARK ? k.park : 1;
   nav.civCost[c] = nav.civDyn[c] = (p & P_CIV) ? ((p & P_SLOW) ? k.rubble : 1) : 0;
   const barrier = (p & P_WALL) ? (k.wall | BARRIER) : (p & P_GATE) ? (k.gate | BARRIER) : 0;
   nav.zCost[c] = barrier || ((p & P_ZOM) ? land : 0);
@@ -152,11 +228,20 @@ export function rebuildPass(world) {
 
 // Recompute a list of fine cells (iterable) after terrain/wall changes.
 export function updatePassCells(world, cells) {
-  const nav = world.nav, terr = world.grid.terrain;
+  const nav = world.nav, terr = world.grid.terrain, dk = nav.deck;
   let changed = false;
   for (const c of cells) {
     const p = passOf(world, c);
     if (p !== nav.pass[c] || terr[c] === T.WATER) { setCell(nav, terr, c, p); changed = true; }
+    if (dk !== null && c < nav.N && (dk.lvf[c] & (LV_DECK | LV_TUNNEL))) {
+      const cx = c % dk.gw, cy = (c / dk.gw) | 0;
+      for (const t of TIERS) {
+        const f = nodeAt(dk, t, cx, cy);
+        if (f < 0) continue;
+        const q = passOf(world, f);
+        if (q !== nav.pass[f]) { setCell(nav, terr, f, q); changed = true; }
+      }
+    }
   }
   if (changed) touchNav(world);
   return changed;
@@ -224,12 +309,19 @@ function dynamicCivCost(world) {
 function startCivField(world, urgent) {
   const nav = world.nav, f = nav.civ, job = f.job, cfg = world.cfg;
   const extra = dynamicCivCost(world);
-  job.begin(nav.civDyn, Math.max(1, cfg.scent.rubbleCost | 0) + extra, Math.ceil(cfg.civ.seekMaxPath / world.grid.cell * 10));
+  const dk = nav.deck;
+  job.begin(nav.civDyn, Math.max(1, cfg.scent.rubbleCost | 0) + extra, Math.ceil(cfg.civ.seekMaxPath / world.grid.cell * 10), dk);
   const zz = world.zones;
   if (zz) for (const comp of zz.comps) {
     if (comp.breached) continue;
     const ic = comp.interiorCells;
     for (let k = 0; k < ic.length; k++) if (nav.civCost[ic[k]]) job.source(ic[k]);
+    // a zone owns the decks above and the tunnels below its interior
+    if (dk !== null) for (let k = 0; k < ic.length; k++) {
+      const c = ic[k];
+      if (!(dk.lvf[c] & (LV_DECK | LV_TUNNEL))) continue;
+      for (const t of TIERS) { const f = nodeAt(dk, t, c % dk.gw, (c / dk.gw) | 0); if (f >= 0 && nav.civCost[f]) job.source(f); }
+    }
   }
   const g = world.grid, cs = g.cell;
   for (const pk of world.pickups) {
@@ -248,15 +340,15 @@ function startCivField(world, urgent) {
 }
 
 function startScent(world, f, cost) {
-  const nav = world.nav, k = nav.k, job = f.job, A = world.A;
-  job.begin(cost, Math.max(k.wall, k.gate, k.rubble, k.water, k.park));
+  const nav = world.nav, k = nav.k, job = f.job, A = world.A, dk = nav.deck;
+  job.begin(cost, Math.max(k.wall, k.gate, k.rubble, k.water, k.park), INF, dk);
   const g = world.grid, inv = 1 / g.cell, gw = g.gw, gh = g.gh;
-  const type = A.type, X = A.x, Y = A.y;
+  const type = A.type, X = A.x, Y = A.y, TR = A.tier;
   for (let i = 0, n = A.n; i < n; i++) {
     const t = type[i];
     if (t === 1 || t >= 4) {
       const cx = (X[i] * inv) | 0, cy = (Y[i] * inv) | 0;
-      if (cx > 0 && cy > 0 && cx < gw - 1 && cy < gh - 1) job.source(cy * gw + cx);
+      if (cx > 0 && cy > 0 && cx < gw - 1 && cy < gh - 1) job.source(dk === null || TR[i] === 0 ? cy * gw + cx : nodeAt(dk, TR[i], cx, cy));
     }
   }
   f.dirty = false;

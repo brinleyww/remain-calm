@@ -81,12 +81,13 @@ export class Hud {
     E.viewC = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleView('specials') }, h('span.rc-tool-name', null, 'Specials'), key('viewSpecials'));
     E.viewR = h('button.rc-tool.rc-toggle', { type: 'button', onclick: () => s.toggleRings() }, h('span.rc-tool-name', null, 'Ranges'), key('viewRanges'));
     E.viewK = h('button.rc-tool.rc-toggle', { type: 'button', title: 'Map key: people, zombies and mutants', onclick: () => this.toggleKey() }, h('span.rc-tool-name', null, 'Key'));
+    E.viewL = h('button.rc-tool.rc-toggle', { type: 'button', title: 'Fade the overpasses to see under them', hidden: !(s.world.grid && s.world.grid.deck), onclick: () => s.toggleDecks() }, h('span.rc-tool-name', null, 'Decks'), key('viewDecks'));
     E.undo = h('button.rc-tool', { type: 'button', onclick: () => s.undo() }, h('span.rc-tool-name', null, 'Undo'), key('undo'));
     E.rack = h('aside.rc-rack.card.flat', null,
       h('div.rc-sec', null, 'Works'), ...TOOLS.map(([n, l]) => toolBtn(n, l)),
       h('div.rc-sec', null, 'Units'), E.units, E.navalSec, E.naval,
       h('div.rc-sec', null, 'Orders'), toolBtn('upgrade', 'Upgrade'), toolBtn('refund', 'Refund'), E.paint, E.loadout, E.undo,
-      h('div.rc-sec', null, 'View'), E.viewH, E.viewC, E.viewR, E.viewK);
+      h('div.rc-sec', null, 'View'), E.viewH, E.viewC, E.viewR, E.viewL, E.viewK);
 
     // ---------------- right column
     E.money = h('b.meter-val'); E.moneyCap = h('small');
@@ -259,6 +260,7 @@ export class Hud {
     toggle(E.viewH, 'is-on', s.view === 'height');
     toggle(E.viewC, 'is-on', s.view === 'specials');
     toggle(E.viewR, 'is-on', s.rings);
+    toggle(E.viewL, 'is-on', s.fadeDecks);
     toggle(E.viewK, 'is-on', !!this.keyOn);
     E.undo.disabled = !planning || !s.undoStack.length || !!s.net;
     E.loadout.disabled = !planning;

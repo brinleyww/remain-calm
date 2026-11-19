@@ -124,5 +124,44 @@ for (const [size, limit] of [[4, 3000], [5, 6000]]) {
   console.log(`timing ${size} km: ${Math.round(ms)} ms, ${map.buildings.length} buildings, ${map.roads.length} roads`);
 }
 
+// --- motorways: viaducts over the main roads, slip roads that work both ways, the centre reaches the deck
+{
+  const { World, TYPE } = await import('../js/sim/world.js');
+  const { INF } = await import('../js/sim/nav.js');
+  const small = generateCity({ seed: 7, sizeKm: 2.5, water: 'river', density: 0.7, stages: 5 });
+  ok(!small.roads.some(r => r.z) && small.v === 1, 'a city under 3 km has no motorway and stays a v1 map');
+  const off = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.7, stages: 5, motorways: false });
+  ok(!off.roads.some(r => r.z), 'motorways: false leaves the city flat');
+  ok(!CAMPAIGN.some(c => getCampaignMap(c.id).roads.some(r => r.z)), 'campaign cities stay flat');
+  const map = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.7, stages: 5 });
+  ok(validateMap(map).ok && map.v === 2, 'a 3 km city with a motorway is a valid v2 map');
+  const mw = map.roads.filter(r => r.z && r.w === 24), slips = map.roads.filter(r => r.z && r.w === 8);
+  ok(mw.length === 1 && Math.max(...mw[0].z) === 1 && slips.length >= 2 && slips.every(r => r.z[0] === 1 && r.z[r.z.length - 1] === 0), `one motorway on viaducts with slip roads (${slips.length})`);
+  const w = new World(map, { seed: 1, sandbox: true, stage: map.levels.length - 1, mutators: ['population.scale=0', 'outbreak.zombies=1', 'outbreak.zombieScaleWithPop=false'] });
+  w.exec({ t: 'ready' });
+  for (let i = 0; i < w.A.n; i++) if (w.A.type[i]) w.remove(i);
+  const g = w.grid, dk = g.deck, cs = g.cell;
+  // a node in the middle of the motorway's longest deck
+  const deck = g.bridges.filter(b => b.deck).sort((a, b) => b.nodes.length - a.nodes.length)[0];
+  const f = deck.nodes[deck.nodes.length >> 1], c = dk.cell[f - dk.N];
+  const h = w.spawn(TYPE.SOLDIER, (c % g.gw + 0.5) * cs, (((c / g.gw) | 0) + 0.5) * cs, 0, dk.tier[f - dk.N]);
+  w.A.stun[h] = 1e9;
+  w.computeFields();
+  const lv = map.levels[0].p;
+  let cx = 0, cy = 0;
+  for (let k = 0; k < lv.length; k += 2) { cx += lv[k]; cy += lv[k + 1]; }
+  cx /= lv.length / 2; cy /= lv.length / 2;
+  const centre = Math.floor(cy / cs) * g.gw + Math.floor(cx / cs);
+  ok(g.terrain[centre] === 1 && w.nav.scent.dist[centre] !== INF, 'the motorway deck reaches the city centre');
+  w.remove(h);
+  const g2 = w.spawn(TYPE.SOLDIER, cx, cy);
+  w.A.stun[g2] = 1e9;
+  w.computeFields();
+  const N = g.gw * g.gh;
+  let rn = 0;
+  for (let k = 0; k < dk.D; k++) if (!w.nav.pass[N + k] || w.nav.scent.dist[N + k] !== INF) rn++;
+  ok(rn === dk.D, `and the centre reaches every deck node (${rn}/${dk.D}): the slip roads work both ways`);
+}
+
 console.log(`\nmap_citygen: ${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

@@ -8,6 +8,7 @@ import { rebuildZones, rebuildFeatureGrids } from './zones.js';
 import { resetStructures } from './structures.js';
 import { resetFire } from './fire.js';
 import { resetMutants } from './mutants.js';
+import { nodeAt } from './decks.js';
 import { nominalPop, computeCaps, recomputeSpent, abilitySp } from './economy.js';
 
 export function freshStats() {
@@ -412,7 +413,8 @@ export function levelSystem(world, dt) {
     let reach = false;
     for (let i = 0; i < A.n && !reach; i++) {
       if (A.type[i] !== ZOMBIE) continue;
-      const c = ((A.y[i] * inv) | 0) * g.gw + ((A.x[i] * inv) | 0);
+      let c = ((A.y[i] * inv) | 0) * g.gw + ((A.x[i] * inv) | 0);
+      if (g.deck && A.tier[i] !== 0) { c = nodeAt(g.deck, A.tier[i], c % g.gw, (c / g.gw) | 0); if (c < 0) continue; }
       if ((A.sub[i] === ZSUB.SWIMMER ? wd : sd)[c] !== 255) reach = true;
     }
     world._soft = reach ? 0 : world._soft + 20 * dt;

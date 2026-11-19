@@ -7,8 +7,9 @@ import { initNav, navSystem, computeFieldsNow, P_IN, P_CIV, P_ZOM, P_SWIM, P_SLO
 import {
   TYPE, TYPE_KEYS, CS, ZSUB, SUB_KEYS, M_CIV, M_ZOMBIE, M_TURNING, M_POLICE, M_MILITIA, M_SOLDIER, M_ARMED, M_HUMAN, M_ALL,
   initAgents, spawnAgent, removeAgent, infectAgent, cureAgent, evacuateAgent, damageAgent, queryAgents, nearestAgent,
-  zombieHp, rebuildHash, agentSystem, releaseCivs, setType, armedStats, markWallAgents,
+  zombieHp, rebuildHash, agentSystem, releaseCivs, setType, armedStats, markWallAgents, TIER_SURFACE, TIER_ALL,
 } from './agents.js';
+import { surfaceAt } from './decks.js';
 import { initZones, registerZoneCommands, rebuildZones, rebuildFeatureGrids, inZone, buildingInZone, savePlacements, loadPlacements, gateCheck } from './zones.js';
 import {
   initStructures, registerStructureCommands, damageBuilding, collapseBuilding, damageBridge, damageWallsArea, damageWallCell,
@@ -20,7 +21,7 @@ import { canAfford, spend, refundPlacement, refundRate, recomputeSpent, costMul,
 import { beginStage, startBattle, levelSystem, freshStats, placementsHash, badgeFor } from './level.js';
 import { installOrders } from './orders.js';
 
-export { TYPE, TYPE_KEYS, CS, ZSUB, SUB_KEYS, M_CIV, M_ZOMBIE, M_TURNING, M_POLICE, M_MILITIA, M_SOLDIER, M_ARMED, M_HUMAN, M_ALL };
+export { TYPE, TYPE_KEYS, CS, ZSUB, SUB_KEYS, M_CIV, M_ZOMBIE, M_TURNING, M_POLICE, M_MILITIA, M_SOLDIER, M_ARMED, M_HUMAN, M_ALL, TIER_SURFACE, TIER_ALL };
 export const PASS = Object.freeze({ IN: P_IN, CIV: P_CIV, ZOMBIE: P_ZOM, SWIM: P_SWIM, SLOW: P_SLOW, WALL: P_WALL, GATE: P_GATE, WATER: P_WATER });
 export const SYSTEM_ORDER = Object.freeze({ hash: 0, nav: 10, agents: 20, functions: 30, mutants: 40, fire: 50, combat: 60, level: 100 });
 
@@ -86,15 +87,18 @@ export class World {
   }
 
   // ------------------------------------------------------------ agents
-  spawn(type, x, y, sub = 0) { return spawnAgent(this, type, x, y, sub); }
+  spawn(type, x, y, sub = 0, tier = 0) { return spawnAgent(this, type, x, y, sub, tier); }
   remove(i) { removeAgent(this, i); }
   setType(i, type) { setType(this, i, type); }
   infect(i) { return infectAgent(this, i); }
   cure(i) { return cureAgent(this, i); }
   evacuate(i) { return evacuateAgent(this, i); }
   damageAgent(i, dmg, src) { return damageAgent(this, i, dmg, src); }
-  query(x, y, r, typeMask, fn) { queryAgents(this, x, y, r, typeMask, fn); }
-  nearest(x, y, r, typeMask) { return nearestAgent(this, x, y, r, typeMask); }
+  // tier: TIER_SURFACE (ground and decks, the default), TIER_ALL, or one tier (-2..3); the same on maps without decks
+  query(x, y, r, typeMask, fn, tier = TIER_SURFACE) { queryAgents(this, x, y, r, typeMask, fn, tier); }
+  nearest(x, y, r, typeMask, tier = TIER_SURFACE) { return nearestAgent(this, x, y, r, typeMask, tier); }
+  // the top tier at a point (air drops land there; 0 on the ground and on maps without decks)
+  surfaceAt(x, y) { return surfaceAt(this, x, y); }
   zombieHp(sub = 0) { return zombieHp(this, sub); }
   armedStats(type, group = -1) { return armedStats(this, type, group); }
   setGroupStats(group, stats) { if (stats) this.groupStats[group] = stats; else delete this.groupStats[group]; }
@@ -285,11 +289,12 @@ export class World {
     let h = 2166136261 >>> 0;
     const mix = (v) => { h = Math.imul(h ^ (v | 0), 16777619) >>> 0; };
     mix(this.tick); mix(['planning', 'battle', 'won', 'lost'].indexOf(this.phase)); mix(this.stage);
-    const A = this.A;
+    const A = this.A, TR = this.grid.deck ? A.tier : null;
     for (let i = 0; i < A.n; i++) {
       const t = A.type[i];
       if (!t) continue;
       mix(i); mix(t); mix(A.sub[i]); mix(A.state[i]); mix(Math.round(A.x[i] * 16)); mix(Math.round(A.y[i] * 16));
+      if (TR) mix(TR[i]);
     }
     for (const pl of this.zones.polys) { mix(pl.id); mix(pl.level); for (const v of pl.p) mix(Math.round(v * 10)); }
     for (const gt of this.zones.gates) { mix(gt.id); mix(Math.round(gt.hp)); }

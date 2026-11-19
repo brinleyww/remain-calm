@@ -1,6 +1,6 @@
 // Abilities bought with command points: targeting, unlock timers, delayed delivery, squads and their effects.
 import { clamp } from '../util/geom.js';
-import { CIV, POLICE, MILITIA, SOLDIER, CS, M_CIV, M_ZOMBIE, M_TURNING, M_ARMED, M_ALL, SQUAD_GROUP } from './agents.js';
+import { CIV, POLICE, MILITIA, SOLDIER, CS, M_CIV, M_ZOMBIE, M_TURNING, M_ARMED, M_ALL, SQUAD_GROUP, TIER_ALL } from './agents.js';
 import { P_CIV, nearestPassable } from './nav.js';
 import { abilityKey, buildingAt, queueShell, destroyUnit, sound, log } from './combat.js';
 import {
@@ -115,11 +115,22 @@ function enlist(world, i, sq, type) {
   sq.size++;
 }
 
-function spawnSquad(world, sq, type, n, x, y, spread) {
+// air: dropped from above, so a man over a deck lands on it
+function spawnSquad(world, sq, type, n, x, y, spread, air = false) {
   const g = world.grid, rng = world.rng;
   let made = 0;
   for (let k = 0; k < n; k++) {
     const a = rng.next() * Math.PI * 2, r = spread * Math.sqrt(rng.next());
+    if (air && g.deck) {
+      const qx = x + Math.cos(a) * r, qy = y + Math.sin(a) * r, t = world.surfaceAt(qx, qy);
+      if (t > 0) {
+        const i = world.spawn(type, qx, qy, 0, t);
+        if (i < 0) break;
+        enlist(world, i, sq, type);
+        made++;
+        continue;
+      }
+    }
     const c = nearestPassable(world, x + Math.cos(a) * r, y + Math.sin(a) * r, P_CIV, 8);
     if (c < 0) continue;
     const px = (c % g.gw + 0.5) * g.cell + rng.range(-1.2, 1.2), py = (((c / g.gw) | 0) + 0.5) * g.cell + rng.range(-1.2, 1.2);
@@ -174,7 +185,7 @@ function nukeDetonate(world, p, a) {
   world.events.emit('sound', { name: 'nuke', x, y, vol: 1 });
   log(world, 'NUCLEAR DETONATION', 'alert', x, y);
   const hits = [];
-  world.query(x, y, R, M_ALL, (i, d2) => { hits.push(i, d2); });
+  world.query(x, y, R, M_ALL, (i, d2) => { hits.push(i, d2); }, TIER_ALL);
   for (let k = 0; k < hits.length; k += 2) {
     const i = hits[k];
     if (!A.type[i]) continue;
@@ -215,7 +226,7 @@ function deliver(world, p) {
   switch (id) {
     case 'paratroopers': {
       const sq = newSquad(world, id, p.x, p.y, p.owner, a.soldier, 'hunt');
-      const n = spawnSquad(world, sq, SOLDIER, a.squad || 20, p.x, p.y, 14);
+      const n = spawnSquad(world, sq, SOLDIER, a.squad || 20, p.x, p.y, 14, true);
       world.effects.push({ kind: 'drop', x: p.x, y: p.y, r: 16, t0: t, dur: 1.5, ability: id });
       log(world, `PARATROOPERS DOWN: ${n} SOLDIERS`, 'info', p.x, p.y);
       break;

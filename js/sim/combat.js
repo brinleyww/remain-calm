@@ -202,7 +202,7 @@ function wetZombieNear(world, x, y, r) {
     if (terr[((A.y[i] * inv) | 0) * g.gw + ((A.x[i] * inv) | 0)] !== T.WATER) return true;
     hit = true;
     return false;
-  });
+  }, 0);
   return hit;
 }
 
@@ -241,7 +241,7 @@ function tgSync(world) {
     S.hpTick = world.tick;
     for (let k = 0; k < 5; k++) S.hp[k] = zombieHp(world, k);
     const f = world.nav && world.nav.scent, d = f && f.dist;
-    if (!d || d.length !== world.grid.gw * world.grid.gh) S.dist = null;
+    if (!d || d.length < world.grid.gw * world.grid.gh) S.dist = null;   // on maps with decks the field also covers the nodes
     else {
       if (d !== S.distRef || f.last !== S.distLast) { S.distRef = d; S.distLast = f.last; S.epoch++; }
       S.dist = d;
@@ -767,16 +767,16 @@ function triggerTrap(world, u, s) {
   let kills = 0;
   if (s.fireRadius) {
     world.ignite(x, y, s.fireRadius, 1, u.type);
-    kills = creditKills(world, u.type, () => world.damageArea(x, y, s.fireRadius, s.dmg || 0, { src: u.type, friendly: !!ff.auto, fire: 1 }));
+    kills = creditKills(world, u.type, () => world.damageArea(x, y, s.fireRadius, s.dmg || 0, { src: u.type, friendly: !!ff.auto, fire: 1, tier: 0 }));
     world.effects.push({ kind: 'fireburst', x, y, r: s.fireRadius, t0: world.t, dur: 1.2 });
     sound(world, 'fire', x, y, 0.7, 2);
   } else if (s.stunSec && !s.dmg) {
-    world.damageArea(x, y, s.splash || 8, 0, { src: u.type, stunSec: s.stunSec });
+    world.damageArea(x, y, s.splash || 8, 0, { src: u.type, stunSec: s.stunSec, tier: 0 });
     world.effects.push({ kind: 'gas', x, y, r: s.splash || 8, t0: world.t, dur: s.stunSec });
     sound(world, 'hiss', x, y, 0.4, 2);
   } else {
     kills = creditKills(world, u.type, () => world.damageArea(x, y, s.splash || 6, s.dmg || 0,
-      { src: u.type, friendly: !!ff.auto, wallDmg: (s.dmg || 0) * ff.autoStructureMul }));
+      { src: u.type, friendly: !!ff.auto, wallDmg: (s.dmg || 0) * ff.autoStructureMul, tier: 0 }));
     world.effects.push({ kind: s.wet ? 'splash' : 'boom', x, y, r: (s.splash || 6) * 1.2, t0: world.t, dur: s.wet ? 1 : 0.5 });
     sound(world, 'explosion', x, y, 0.4, 2);
   }
@@ -791,7 +791,7 @@ export function detonate(world, u) {
   const x = u.x, y = u.y, key = u.type;
   const bd = u.b >= 0 ? world.buildings[u.b] : null, br = u.bridge >= 0 ? world.bridges[u.bridge] : null;
   const r = (s.splash || 30) + (bd ? bd.r : br ? br.width * 0.5 : 0);
-  let kills = creditKills(world, key, () => world.damageArea(x, y, r, s.dmg || 0, { src: key, friendly: true, wallDmg: s.dmg || 0 }));
+  let kills = creditKills(world, key, () => world.damageArea(x, y, r, s.dmg || 0, { src: key, friendly: true, wallDmg: s.dmg || 0, tier: br && br.deck ? br.tier || 1 : 0 }));
   if (u.b >= 0) {
     const a = world.rng.next() * Math.PI * 2;
     kills += creditKills(world, key, () => world.damageBuilding(u.b, s.bldgDmg || 0, key, Math.cos(a), Math.sin(a)));
@@ -834,12 +834,12 @@ function updateOil(world, u, s) {
 // Spike strips slow zombies standing on them and wear out; oil slicks catch alight a few seconds after a zombie steps in.
 function lineSystem(world, dt) {
   const C = world.combat, A = world.A, mask = C.lineMask, g = world.grid, inv = 1 / g.cell, gw = g.gw, pass = world.nav.pass;
-  const X = A.x, Y = A.y, VX = A.vx, VY = A.vy, type = A.type, sub = A.sub, stun = A.stun;
+  const X = A.x, Y = A.y, VX = A.vx, VY = A.vy, type = A.type, sub = A.sub, stun = A.stun, TR = g.deck ? A.tier : null;
   const giantMul = (world.cfg.mutation.kinds.giant && world.cfg.mutation.kinds.giant.wallDpsMul) || 1;
   for (let i = 0, n = A.n; i < n; i++) {
     if (type[i] !== ZOMBIE) continue;
     const c = ((Y[i] * inv) | 0) * gw + ((X[i] * inv) | 0), m = mask[c];
-    if (!m) continue;
+    if (!m || (TR !== null && TR[i] !== 0)) continue;
     if (m & 1) {
       const e = C.spikeAt.get(c);
       if (e && stun[i] <= 0) {
@@ -869,7 +869,7 @@ function touchDamage(world, dt) {
   for (const u of world.units) {
     if (!u.alive || !u.hpMax || !zombiesNear(world, u.x, u.y, R)) continue;
     let n = 0;
-    world.query(u.x, u.y, R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; });
+    world.query(u.x, u.y, R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; }, 0);
     if (!n) continue;
     u.hp -= zc.wallDps * dt * n;
     if (u.hp <= 0) destroyUnit(world, u, 'overrun');
@@ -909,7 +909,7 @@ export function combatSystem(world, dt) {
     } else if (kind === 'trap') {
       if (!anyZ || ((world.tick + u.id) & 1)) continue;
       const s = stats(world, u);
-      if (s.wet ? wetZombieNear(world, u.x, u.y, s.trigger || 3) : world.nearest(u.x, u.y, s.trigger || 3, M_ZOMBIE) >= 0) triggerTrap(world, u, s);
+      if (s.wet ? wetZombieNear(world, u.x, u.y, s.trigger || 3) : world.nearest(u.x, u.y, s.trigger || 3, M_ZOMBIE, 0) >= 0) triggerTrap(world, u, s);
     } else if (kind === 'oil') updateOil(world, u, stats(world, u));
   }
   landShells(world);

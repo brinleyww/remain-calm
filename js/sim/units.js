@@ -4,6 +4,7 @@ import { DEFAULTS } from '../data/config.js';
 import { T } from '../map/format.js';
 import { polyPerimeter, distToPolyline, rasterPolyline } from '../util/geom.js';
 import { isWalkTerrain } from './nav.js';
+import { LV_DECK, nodeAt } from './decks.js';
 import {
   makeCombatState, combatSystem, resetCombatRuntime, unitStats, unitRange, initRuntime, indexAdd, lineCells,
   buildingAt, destroyUnit, detonate, onCollapse, onBridgeDown, placedReadyAt, kindOf,
@@ -97,8 +98,16 @@ function tooClose(world, x, y, gap, mount) {
   return false;
 }
 
+// A water bridge at cell c, or the top standing deck over it (which wins: it is what the player sees there).
 function bridgeAt(world, c) {
-  const g = world.grid, br = g.bridgeId[c] - 1;
+  const g = world.grid, dk = g.deck;
+  if (dk && (dk.lvf[c] & LV_DECK)) {
+    for (let t = 3; t >= 1; t--) {
+      const f = nodeAt(dk, t, c % g.gw, (c / g.gw) | 0), sid = f >= 0 ? dk.sid[f - dk.N] : -1;
+      if (sid >= 0 && world.bridges[sid] && world.bridges[sid].alive) return sid;
+    }
+  }
+  const br = g.bridgeId[c] - 1;
   return br >= 0 && g.terrain[c] === T.BRIDGE && world.bridges[br] && world.bridges[br].alive ? br : -1;
 }
 
@@ -123,7 +132,8 @@ export function canPlace(world, type, x, y, owner = 0) {
       return { ok: true, reason: '', b, bridge: -1, x: bd.cx, y: bd.cy, cell: c };
     }
     case 'building|bridge': {
-      const b = buildingAt(world, x, y);
+      const deckBr = g.deck ? bridgeAt(world, c) : -1;
+      const b = deckBr >= 0 && world.bridges[deckBr].deck ? -1 : buildingAt(world, x, y);
       if (b >= 0) {
         if (C.c4At.has('b' + b)) return fail('That building is already wired');
         const bd = world.buildings[b];

@@ -1,7 +1,7 @@
 // Decorative trains on the railways. A train's position comes from the map and the train clock alone. The clock
 // follows the battle clock (world.t) and keeps running through planning, so trains pause with the game, speed
 // up with it and look the same for both co-op players without any messages. Nothing here touches the simulation.
-import { railNetFor, sampleAt } from './railnet.js';
+import { railNetFor, sampleAt, zAlong } from './railnet.js';
 import { mulberry32, hashStr } from '../util/rng.js';
 import { mix } from './palette.js';
 
@@ -13,6 +13,8 @@ const PH = 6;                      // per phase: t0, s0, v0, a, dir, flags
 const K_COACH = 0, K_LOCO = 1, K_CAB = 2, K_WAGON = 3;
 const GLYPH_Z = 1.0;               // CSS px per metre below which a train is drawn as a segmented bar
 const MAX_CARS = 14;
+// car levels on railways with heights: drawn under the decks, on top of them, hidden in a tunnel, fading at a portal
+const C_LOW = 0, C_HIGH = 1, C_HIDDEN = 2, C_FADE = 3;
 
 // ---------------------------------------------------------------- timetables
 
@@ -291,6 +293,24 @@ export class TrainLayer {
     this.vis = new Int32Array(MAX_TRAINS * 2);
     this.bb = [0, 0, 0, 0];
     this.stats = { trains: trains.length, drawn: 0, ms: 0 };
+    this.levelled = trains.some((tr) => tr.route.z);
+    this.carLev = new Uint8Array(MAX_TRAINS * MAX_CARS);
+    this.nv = 0;
+  }
+
+  // Level of every placed car from the height of the track under its middle.
+  _levels(tau, nv) {
+    const vis = this.vis, trains = this.trains, lev = this.carLev;
+    for (let v = 0; v < nv; v++) {
+      const tr = trains[vis[2 * v]], n = vis[2 * v + 1], rt = tr.route;
+      if (!rt.z) { lev.fill(C_LOW, v * MAX_CARS, v * MAX_CARS + n); continue; }
+      trainAt(tr, tau, S5);
+      const s = S5[0], dir = S5[1];
+      for (let k = 0; k < n; k++) {
+        const c = tr.cars[k], m = s - dir * (c.off + c.len / 2), z = zAlong(rt.p, rt.cum, rt.z, m);
+        lev[v * MAX_CARS + k] = z >= 0.5 ? C_HIGH : z <= -0.6 ? C_HIDDEN : z < -0.25 ? C_FADE : C_LOW;
+      }
+    }
   }
 
   // Car geometry for every train on screen at clock tau (no drawing); returns how many trains were placed.
@@ -319,39 +339,54 @@ export class TrainLayer {
   }
 
   // ctx in CSS px (dpr applied). st: as TrainClock.update, plus trains (false hides them) and horn(x, y).
-  draw(ctx, world, cam, st, pal) {
-    const tau = this.clock.update(world, st);
-    if (!this.trains.length || st.trains === false) return 0;
-    const z = cam.zoom, ox = cam.x, oy = cam.y;
-    const bb = cam.visibleBBox(30, this.bb);
-    const near = z >= 0.7 && this.clock.step > 0 && this.clock.step < 3 && st.horn;
-    const nv = this.place(tau, bb, near ? st.horn : null);
-    this.stats.drawn = nv;
-    if (!nv) return 0;
-    const c = trainColours(pal), geo = this.geo, vis = this.vis, trains = this.trains, map = this.map;
+  // pass: -1 every car (maps without decks); 0 places the trains and draws the cars under the decks; 1 the cars on viaducts.
+  draw(ctx, world, cam, st, pal, pass = -1) {
+    let nv = this.nv;
+    if (pass !== 1) {
+      const tau = this.clock.update(world, st);
+      this.nv = 0;
+      if (!this.trains.length || st.trains === false) return 0;
+      const z = cam.zoom;
+      const bb = cam.visibleBBox(30, this.bb);
+      const near = z >= 0.7 && this.clock.step > 0 && this.clock.step < 3 && st.horn;
+      nv = this.nv = this.place(tau, bb, near ? st.horn : null);
+      this.stats.drawn = nv;
+      if (nv && this.levelled) this._levels(tau, nv);
+    }
+    if (!nv || (pass === 1 && !this.levelled)) return 0;
+    const z = cam.zoom, ox = cam.x, oy = cam.y, c = trainColours(pal), map = this.map;
     ctx.save();
     ctx.beginPath();
     ctx.rect(-ox * z, -oy * z, map.w * z, map.h * z);
     ctx.clip();
     ctx.lineJoin = 'miter';
     ctx.setLineDash([]);
-    if (z < GLYPH_Z) this._glyphs(ctx, c, z, ox, oy, nv);
-    else this._cars(ctx, c, z, ox, oy, nv);
+    const sets = !this.levelled || pass === -1 ? [-1] : pass === 1 ? [C_HIGH] : [C_LOW, C_FADE];
+    for (const want of sets) {
+      if (want === C_FADE) ctx.globalAlpha = 0.45;
+      if (z < GLYPH_Z) this._glyphs(ctx, c, z, ox, oy, nv, want);
+      else this._cars(ctx, c, z, ox, oy, nv, want);
+    }
     ctx.restore();
     return nv;
   }
 
   // Far out a train is an outlined light bar with a solid head and a tick at each coupling, so it stands
   // apart from the chequered line it runs on.
-  _glyphs(ctx, c, z, ox, oy, nv) {
-    const geo = this.geo, vis = this.vis, trains = this.trains;
+  // want: the car level to draw (-1 every car)
+  _glyphs(ctx, c, z, ox, oy, nv, want = -1) {
+    const geo = this.geo, vis = this.vis, trains = this.trains, lev = this.carLev;
+    const on = (v, k) => want < 0 || lev[v * MAX_CARS + k] === want;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
     ctx.beginPath();
     for (let v = 0; v < nv; v++) {
       const n = vis[2 * v + 1], g = v * MAX_CARS * 4;
-      ctx.moveTo((geo[g] - ox) * z, (geo[g + 1] - oy) * z);
-      for (let k = 0; k < n; k++) ctx.lineTo((geo[g + 4 * k + 2] - ox) * z, (geo[g + 4 * k + 3] - oy) * z);
+      for (let k = 0; k < n; k++) {
+        if (!on(v, k)) continue;
+        if (k === 0 || !on(v, k - 1)) ctx.moveTo((geo[g + 4 * k] - ox) * z, (geo[g + 4 * k + 1] - oy) * z);
+        ctx.lineTo((geo[g + 4 * k + 2] - ox) * z, (geo[g + 4 * k + 3] - oy) * z);
+      }
     }
     ctx.lineWidth = 7;
     ctx.strokeStyle = c.line;
@@ -363,6 +398,7 @@ export class TrainLayer {
     for (let v = 0; v < nv; v++) {
       const tr = trains[vis[2 * v]], n = vis[2 * v + 1], g = v * MAX_CARS * 4;
       for (let k = 0; k < n; k++) {
+        if (!on(v, k)) continue;
         const fx = (geo[g + 4 * k] - ox) * z, fy = (geo[g + 4 * k + 1] - oy) * z, bx = (geo[g + 4 * k + 2] - ox) * z, by = (geo[g + 4 * k + 3] - oy) * z;
         if (tr.cars[k].k === K_LOCO) { ctx.moveTo(fx, fy); ctx.lineTo(bx, by); continue; }
         const dx = fx - bx, dy = fy - by, l = Math.hypot(dx, dy) || 1, nx = -dy / l * 2.3, ny = dx / l * 2.3;
@@ -375,7 +411,7 @@ export class TrainLayer {
     ctx.beginPath();
     for (let v = 0; v < nv; v++) {
       const tr = trains[vis[2 * v]], g = v * MAX_CARS * 4;
-      if (tr.cars[0].k !== K_LOCO) continue;
+      if (tr.cars[0].k !== K_LOCO || !on(v, 0)) continue;
       ctx.moveTo((geo[g] - ox) * z, (geo[g + 1] - oy) * z);
       ctx.lineTo((geo[g + 2] - ox) * z, (geo[g + 3] - oy) * z);
     }
@@ -384,8 +420,9 @@ export class TrainLayer {
     ctx.stroke();
   }
 
-  _cars(ctx, c, z, ox, oy, nv) {
-    const geo = this.geo, vis = this.vis, trains = this.trains;
+  _cars(ctx, c, z, ox, oy, nv, want = -1) {
+    const geo = this.geo, vis = this.vis, trains = this.trains, lev = this.carLev;
+    const on = (v, k) => want < 0 || lev[v * MAX_CARS + k] === want;
     const hw = Math.max(CAR_W * z, 4) / 2, sh = Math.max(1.5, Math.min(3, z * 0.8));
     const cabL = Math.max(2, 1.8 * z), cabIn = Math.max(1, 0.6 * z);
     for (let pass = 0; pass < 6; pass++) {
@@ -393,6 +430,7 @@ export class TrainLayer {
       for (let v = 0; v < nv; v++) {
         const tr = trains[vis[2 * v]], n = vis[2 * v + 1], g0 = v * MAX_CARS * 4;
         for (let k = 0; k < n; k++) {
+          if (!on(v, k)) continue;
           const kind = tr.cars[k].k, g = g0 + 4 * k, len = tr.cars[k].len * z;
           if (pass === 0) quad(ctx, geo, g, ox, oy, z, hw, 0, 0, 1, sh);
           else if (pass === 1) { if (kind === K_COACH || kind === K_CAB) quad(ctx, geo, g, ox, oy, z, hw, 0, 0, 1, 0); }
@@ -417,7 +455,7 @@ export class TrainLayer {
       const tr = trains[vis[2 * v]], n = vis[2 * v + 1], g0 = v * MAX_CARS * 4;
       for (let k = 0; k < n; k++) {
         const kind = tr.cars[k].k, g = g0 + 4 * k;
-        if (kind === K_LOCO) continue;
+        if (kind === K_LOCO || !on(v, k)) continue;
         const fx = (geo[g] - ox) * z, fy = (geo[g + 1] - oy) * z, bx = (geo[g + 2] - ox) * z, by = (geo[g + 3] - oy) * z;
         if (kind === K_WAGON) {
           const mx = (fx + bx) / 2, my = (fy + by) / 2, l = Math.hypot(fx - bx, fy - by) || 1;

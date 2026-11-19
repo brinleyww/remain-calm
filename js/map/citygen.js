@@ -4,10 +4,12 @@
 import { Rng, hashStr, makeNoise2D } from '../util/rng.js';
 import { polyArea, polySignedArea, polyCentroid, polyBBox, pointInPoly, rasterPoly, rasterSeg, simplify, clamp, lerp, segIntersect, distToSeg } from '../util/geom.js';
 import { FORMAT, VERSION, normalizeMap, makeStages, mergeHoles, clipPolyRect, clipLineRect } from './format.js';
+import { simplifyZ } from './osmlevels.js';
 
 export const WATER_TYPES = ['none', 'river', 'coast', 'lake', 'islands'];
 
-const FREE = 0, WATER = 1, ROAD = 2, RAIL = 3, PARK = 4, BLDG = 5, KEEP = 6;
+const FREE = 0, WATER = 1, ROAD = 2, RAIL = 3, PARK = 4, BLDG = 5, KEEP = 6, MWAY = 7;
+const MWAY_W = 24;
 const DT = 1, MID = 2, OLD = 3, SUB = 4, IND = 5, PRK = 6;
 const TAU = Math.PI * 2;
 const OCC_CELL = 2, ZG_CELL = 8;
@@ -25,6 +27,8 @@ export function normalizeCityOptions(opts = {}) {
     density: clamp(opts.density == null || opts.density === '' ? 0.6 : +opts.density || 0, 0, 1),
     bridges: water === 'none' ? 0 : clamp(Math.round(opts.bridges == null ? 3 : +opts.bridges || 0), 0, 16),
     stages: clamp(Math.round(+opts.stages || 5), 3, 7),
+    // sheets of 3 km and more get a motorway (two from 6 km) on viaducts over the main roads, rail and water
+    motorways: opts.motorways === undefined || opts.motorways === null ? true : !!opts.motorways,
     name: typeof opts.name === 'string' && opts.name.trim() ? opts.name.trim().slice(0, 80) : '',
   };
 }
@@ -47,12 +51,15 @@ export function generateCity(options = {}) {
   chooseCentre(ctx);
   chooseSatellites(ctx);
   planRail(ctx);
+  planMotorways(ctx);
   setupWarp(ctx);
   planDistricts(ctx);
   layStreets(ctx);
   warpAll(ctx);
   buildZoneGrid(ctx);
+  elevateMotorways(ctx);
   clipRoads(ctx);
+  layMotorways(ctx);
   addEmbankments(ctx);
   stampRoads(ctx, ctx.roads);
   buildBridges(ctx);
@@ -80,10 +87,11 @@ function occAt(o, x, y) {
   if (cx >= o.gw || cy >= o.gh) return 255;
   return o.a[cy * o.gw + cx];
 }
-// mode: 0 set always, 1 only FREE/KEEP/PARK cells, 2 anything but WATER
+// mode: 0 set always, 1 only FREE/KEEP/PARK cells, 2 anything but WATER, 3 only motorway cells
 function stampPoly(o, p, v, mode) {
   const a = o.a;
   if (mode === 0) rasterPoly(p, o.cell, o.gw, o.gh, i => { a[i] = v; });
+  else if (mode === 3) rasterPoly(p, o.cell, o.gw, o.gh, i => { if (a[i] === MWAY) a[i] = v; });
   else if (mode === 1) rasterPoly(p, o.cell, o.gw, o.gh, i => { const c = a[i]; if (c === FREE || c === KEEP || c === PARK) a[i] = v; });
   else rasterPoly(p, o.cell, o.gw, o.gh, i => { if (a[i] !== WATER) a[i] = v; });
 }
@@ -685,6 +693,229 @@ function railLine(ctx, rng, avoid) {
   return best;
 }
 
+// ================================================================= motorways
+// An edge-to-edge motorway that bypasses the core (two on a metro sheet). It is planned like the railway, before the
+// streets; once the main roads exist it goes up on viaducts (z 1) around every crossing with them, the railway, the
+// other motorway and water, and over the whole inner city, with 90 m ramps. At-grade stretches cut the local streets.
+// One crossing is an underpass (the main road dips under), and one or two get diamond interchanges.
+function planMotorways(ctx) {
+  ctx.mways = [];
+  const { o, S, W, H } = ctx;
+  if (!o.motorways || S < 3) return;
+  const n = S >= 6 ? 2 : 1;
+  for (let k = 0; k < n; k++) {
+    const pts = motorwayLine(ctx, ctx.rng.fork('mway' + k), ctx.mways.map(m => m.p));
+    if (!pts) continue;
+    let best = null;
+    for (const piece of clipLineRect(pts, -2, -2, W + 2, H + 2)) if (!best || polyLen(piece) > polyLen(best)) best = piece;
+    if (!best || polyLen(best) < 600) continue;
+    const nm = ctx.rng.fork('mway-name' + k);
+    ctx.mways.push({ p: best, k, name: `${nm.pick(['North', 'South', 'East', 'West', 'Outer', 'Valley', 'Lowland'])} ${nm.pick(['Motorway', 'Expressway', 'Freeway', 'Parkway'])}` });
+    stampLine(ctx.occ, best, MWAY_W + 10, MWAY, 2);
+  }
+}
+
+function motorwayLine(ctx, rng, avoid) {
+  const { W, H, cx, cy, Rd, occ } = ctx;
+  const edgePt = (e, t) => [[t * W, -300], [W + 300, t * H], [t * W, H + 300], [-300, t * H]][e];
+  const rails = ctx.rail || [];
+  let best = null, bs = Infinity;
+  for (let k = 0; k < 40; k++) {
+    const e1 = rng.int(0, 3), e2 = (e1 + (rng.chance(0.7) ? 2 : rng.chance(0.5) ? 1 : 3)) % 4;
+    const A = edgePt(e1, rng.range(0.12, 0.88)), B = edgePt(e2, rng.range(0.12, 0.88));
+    const L = dist(A[0], A[1], B[0], B[1]), px = -(B[1] - A[1]) / L, py = (B[0] - A[0]) / L;
+    const off = (Rd + rng.range(260, 620)) * rng.sign();
+    const M = [cx + px * off, cy + py * off];
+    const a1 = Math.atan2(M[1] - A[1], M[0] - A[0]), a2 = Math.atan2(B[1] - M[1], B[0] - M[0]);
+    let turn = Math.abs(a2 - a1); if (turn > Math.PI) turn = TAU - turn;
+    if (turn > 0.9) continue;
+    const pts = catmull([[2 * A[0] - M[0], 2 * A[1] - M[1]], A, M, B, [2 * B[0] - M[0], 2 * B[1] - M[1]]], 20);
+    let wl = 0, minD = Infinity, near = 0;
+    for (let i = 0; i < pts.length; i += 2) {
+      if (occAt(occ, pts[i], pts[i + 1]) === WATER) wl++;
+      minD = Math.min(minD, dist(pts[i], pts[i + 1], cx, cy));
+    }
+    for (const line of [...rails, ...avoid]) {
+      for (let i = 0; i < pts.length; i += 6) for (let j = 0; j + 3 < line.length; j += 2) {
+        if (distToSeg(pts[i], pts[i + 1], line[j], line[j + 1], line[j + 2], line[j + 3]) < 90) { near++; break; }
+      }
+    }
+    const score = wl * 12 + turn * 220 + Math.abs(minD - Rd - 380) * 0.25 + near * 25 + rng.range(0, 80);
+    if (score < bs) { bs = score; best = pts; }
+  }
+  return best;
+}
+
+// Points every `step` metres along p, with their arc lengths.
+function resampleLine(p, step) {
+  const out = [p[0], p[1]], cum = [0];
+  let acc = 0;
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    const L = dist(p[i], p[i + 1], p[i + 2], p[i + 3]), n = Math.max(1, Math.round(L / step));
+    for (let k = 1; k <= n; k++) { out.push(p[i] + (p[i + 2] - p[i]) * k / n, p[i + 1] + (p[i + 3] - p[i + 1]) * k / n); cum.push(acc + L * k / n); }
+    acc += L;
+  }
+  return { p: out, cum, L: acc };
+}
+
+// Crossings of polyline p (with arc lengths cum) by polyline q: [{ s, x, y, ux, uy (q's direction) }].
+function crossingsOf(p, cum, q) {
+  const out = [];
+  for (let j = 0; j + 3 < q.length; j += 2) {
+    const qx0 = Math.min(q[j], q[j + 2]), qx1 = Math.max(q[j], q[j + 2]), qy0 = Math.min(q[j + 1], q[j + 3]), qy1 = Math.max(q[j + 1], q[j + 3]);
+    for (let i = 0; i + 3 < p.length; i += 2) {
+      if (Math.max(p[i], p[i + 2]) < qx0 || Math.min(p[i], p[i + 2]) > qx1 || Math.max(p[i + 1], p[i + 3]) < qy0 || Math.min(p[i + 1], p[i + 3]) > qy1) continue;
+      const t = segIntersect(p[i], p[i + 1], p[i + 2], p[i + 3], q[j], q[j + 1], q[j + 2], q[j + 3]);
+      if (t < 0) continue;
+      const L = dist(q[j], q[j + 1], q[j + 2], q[j + 3]) || 1;
+      out.push({ s: cum[i >> 1] + (cum[(i >> 1) + 1] - cum[i >> 1]) * t, x: p[i] + (p[i + 2] - p[i]) * t, y: p[i + 1] + (p[i + 3] - p[i + 1]) * t,
+        ux: (q[j + 2] - q[j]) / L, uy: (q[j + 3] - q[j + 1]) / L });
+    }
+  }
+  return out;
+}
+
+function elevateMotorways(ctx) {
+  if (!ctx.mways.length) return;
+  const { cx, cy, Rmid, occ } = ctx;
+  const majors = ctx.roads.filter(r => r.cls === 'art' || r.cls === 'ring' || r.cls === 'ave');
+  for (const mw of ctx.mways) {
+    const R = resampleLine(mw.p, 10), p = R.p, cum = R.cum, L = R.L, n = cum.length;
+    const iv = [];
+    const raise = (a, b, z = 1) => iv.push([Math.max(0, a), Math.min(L, b), z]);
+    const mc = [];
+    for (const r of majors) for (const c of crossingsOf(p, cum, r.p)) { c.road = r; mc.push(c); }
+    const hard = [];
+    for (const line of ctx.rail || []) for (const c of crossingsOf(p, cum, line)) hard.push(c.s);
+    for (const other of ctx.mways) {
+      if (other === mw) continue;
+      for (const c of crossingsOf(p, cum, other.p)) { hard.push(c.s); if (mw.k > 0) raise(c.s - 140, c.s + 140, 2); }
+    }
+    let wet = -1;
+    for (let k = 0; k < n; k++) {
+      const w = occAt(occ, p[2 * k], p[2 * k + 1]) === WATER;
+      if (w && wet < 0) wet = cum[k];
+      if ((!w || k === n - 1) && wet >= 0) { raise(wet - 140, cum[k] + 140); hard.push(wet, cum[k]); wet = -1; }
+    }
+    let inner = -1;
+    for (let k = 0; k < n; k++) {
+      const inside = dist(p[2 * k], p[2 * k + 1], cx, cy) < Rmid;
+      if (inside && inner < 0) inner = cum[k];
+      if ((!inside || k === n - 1) && inner >= 0) { raise(inner, cum[k]); inner = -1; }
+    }
+    for (const s of hard) raise(s - 140, s + 140);
+    // one main-road crossing away from everything else becomes an underpass; one or two others get interchanges
+    const lone = (c, d) => !hard.some(s => Math.abs(s - c.s) < d) && !mc.some(o => o !== c && Math.abs(o.s - c.s) < d) && dist(c.x, c.y, cx, cy) > Rmid + 200;
+    const steep = c => { const k = Math.min(n - 2, Math.max(0, cum.findIndex(v => v >= c.s) - 1)), tx = p[2 * k + 2] - p[2 * k], ty = p[2 * k + 3] - p[2 * k + 1], tl = Math.hypot(tx, ty) || 1; return Math.abs(tx / tl * c.uy - ty / tl * c.ux) > 0.6; };
+    const cand = mc.filter(c => c.s > 300 && c.s < L - 300 && steep(c));
+    mw.under = null;
+    const u = cand.filter(c => lone(c, 450)).sort((a, b) => a.s - b.s)[0];
+    if (u) mw.under = u;
+    mw.ics = [];
+    const want = ctx.S >= 6 ? 2 : 1;
+    const ics = cand.filter(c => c !== u && c.s > 420 && c.s < L - 420 && !hard.some(s => Math.abs(s - c.s) < 360)).sort((a, b) =>
+      Math.abs(dist(a.x, a.y, cx, cy) - Rmid - 500) - Math.abs(dist(b.x, b.y, cx, cy) - Rmid - 500) || a.s - b.s);
+    for (const c of ics) {
+      if (mw.ics.length >= want) break;
+      if (mw.ics.some(o => Math.abs(o.s - c.s) < 900)) continue;
+      if (mw.under && Math.abs(mw.under.s - c.s) < 700) continue;
+      mw.ics.push(c);
+    }
+    for (const c of mc) {
+      if (c === mw.under) continue;
+      const half = mw.ics.includes(c) ? 330 : 140;
+      raise(c.s - half, c.s + half);
+    }
+    // merge raised stretches closer than 350 m; the higher tier of two overlapping stretches wins inside it
+    iv.sort((a, b) => a[0] - b[0]);
+    const runs = [];
+    for (const [a, b, z] of iv) {
+      const last = runs[runs.length - 1];
+      if (last && a - last[1] < 350 && last[2] === 1 && z === 1) last[1] = Math.max(last[1], b);
+      else runs.push([a, b, z]);
+    }
+    const RAMP = 90;
+    const zAtS = (s) => {
+      let z = 0;
+      for (const [a, b, t] of runs) {
+        const ramp = RAMP * t;
+        const v = s >= a && s <= b ? t : s < a ? t * (1 - (a - s) / ramp) : t * (1 - (s - b) / ramp);
+        if (v > z) z = v;
+      }
+      return Math.round(Math.max(0, z) * 10) / 10;
+    };
+    const zs = cum.map(zAtS);
+    const sp = simplifyZ(p, zs, 0.4);
+    mw.rp = p; mw.rcum = cum; mw.L = L;
+    mw.p = sp.p; mw.z = sp.z.some(v => v !== 0) ? sp.z : null; mw.zAtS = zAtS;
+    // viaduct stretches no longer cut the local streets: they pass underneath
+    for (let k = 0; k + 1 < n; k++) if (zAtS(cum[k]) >= 0.5 && zAtS(cum[k + 1]) >= 0.5) stampLine(occ, [p[2 * k], p[2 * k + 1], p[2 * k + 2], p[2 * k + 3]], MWAY_W + 10, ROAD, 3);
+  }
+}
+
+// Point and direction at arc length s along polyline p (cum = its arc lengths per vertex).
+function alongLine(p, cum, s) {
+  const n = cum.length;
+  let k = 0;
+  while (k < n - 2 && cum[k + 1] < s) k++;
+  const L = cum[k + 1] - cum[k] || 1, t = clamp((s - cum[k]) / L, 0, 1);
+  const x = p[2 * k] + (p[2 * k + 2] - p[2 * k]) * t, y = p[2 * k + 1] + (p[2 * k + 3] - p[2 * k + 1]) * t;
+  return [x, y, (p[2 * k + 2] - p[2 * k]) / L, (p[2 * k + 3] - p[2 * k + 1]) / L];
+}
+
+function cumOf(p) { const c = [0]; for (let i = 0; i + 3 < p.length; i += 2) c.push(c[c.length - 1] + dist(p[i], p[i + 1], p[i + 2], p[i + 3])); return c; }
+
+// The motorways go into the road list after the streets were clipped; then the underpass and the slip roads.
+function layMotorways(ctx) {
+  const { occ } = ctx;
+  for (const mw of ctx.mways) {
+    ctx.roads.push({ p: mw.p, z: mw.z, w: MWAY_W, k: 'major', cls: 'mway', name: mw.name });
+    if (mw.under) underpass(ctx, mw, mw.under);
+    for (const c of mw.ics) interchange(ctx, mw, c);
+  }
+  function underpass(ctx2, mw, c) {
+    let best = null, bd = 30;
+    for (const r of ctx2.roads) {
+      if (r.z || !(r.cls === 'art' || r.cls === 'ring' || r.cls === 'ave')) continue;
+      const cum = cumOf(r.p);
+      for (const q of crossingsOf(r.p, cum, mw.rp)) { const d = dist(q.x, q.y, c.x, c.y); if (d < bd) { bd = d; best = { r, s: q.s, cum }; } }
+    }
+    if (!best) { mw.under = null; return; }
+    const { r, s } = best, L = best.cum[best.cum.length - 1];
+    if (s < 120 || s > L - 120) { mw.under = null; return; }
+    const R2 = resampleLine(r.p, 6), zs = R2.cum.map(v => { const d = Math.abs(v - s); return d <= 40 ? -1 : d >= 110 ? 0 : -Math.round((1 - (d - 40) / 70) * 10) / 10; });
+    const sp = simplifyZ(R2.p, zs, 0.3);
+    r.p = sp.p; r.z = sp.z;
+  }
+  function interchange(ctx2, mw, c) {
+    let road = null, sa = 0, ca = null, bd = 30;
+    for (const r of ctx2.roads) {
+      if (r.z || !(r.cls === 'art' || r.cls === 'ring' || r.cls === 'ave')) continue;
+      const cum = cumOf(r.p);
+      for (const q of crossingsOf(r.p, cum, mw.rp)) { const d = dist(q.x, q.y, c.x, c.y); if (d < bd) { bd = d; road = r; sa = q.s; ca = cum; } }
+    }
+    if (!road) return;
+    const La = ca[ca.length - 1];
+    let made = 0;
+    for (const sv of [-1, 1]) {
+      const sP = sa + sv * 75;
+      if (sP < 5 || sP > La - 5) continue;
+      const [px, py] = alongLine(road.p, ca, sP);
+      for (const su of [-1, 1]) {
+        const [x0, y0, tx, ty] = alongLine(mw.rp, mw.rcum, c.s + su * 290), [x1, y1] = alongLine(mw.rp, mw.rcum, c.s + su * 130);
+        const nx = -ty, ny = tx, side = (px - c.x) * nx + (py - c.y) * ny >= 0 ? 1 : -1, o0 = 16 * side, o1 = 28 * side;
+        const q = [x0 + nx * o0, y0 + ny * o0, x1 + nx * o1, y1 + ny * o1, px, py];
+        let wet = false;
+        for (let k = 0; k <= 20 && !wet; k++) { const [wx, wy] = alongLine(q, cumOf(q), polyLen(q) * k / 20); if (occAt(occ, wx, wy) === WATER) wet = true; }
+        if (wet) continue;
+        ctx2.roads.push({ p: q, z: [1, 0, 0], w: 8, k: 'major', cls: 'slip', name: mw.name + ' Slip' });
+        made++;
+      }
+    }
+    if (!made) mw.ics = mw.ics.filter(o => o !== c);
+  }
+}
+
 // Two to four satellite town centres out in the suburbs of a metro sheet, each a few blocks of mid-rise streets.
 function chooseSatellites(ctx) {
   if (!ctx.metro) return;
@@ -1225,7 +1456,7 @@ const FRONT_CLS = { ring: 0, ave: 1, art: 2, emb: 3, loc: 4 };
 
 function clipRoads(ctx) {
   const out = [];
-  const isRail = c => c === RAIL;
+  const isRail = c => c === RAIL || c === MWAY;
   for (const r of ctx.roads) {
     const major = r.cls === 'art' || r.cls === 'ring' || r.cls === 'ave';
     const trim = r.w / 2 + 2;
@@ -1389,6 +1620,7 @@ function dropStrayBridges(ctx) {
   const okCell = () => {
     const mark = new Uint8Array(gw * gh);
     for (const r of ctx.roads) {
+      if (r.z) continue;   // decks and tunnels never touch the water under them
       const v = r.k === 'bridge' ? 2 : 1, w = Math.max(r.w, cell);
       for (let i = 0; i + 3 < r.p.length; i += 2) rasterSeg(r.p[i], r.p[i + 1], r.p[i + 2], r.p[i + 3], w, cell, gw, gh, c => { if (water[c]) mark[c] |= v; });
     }
@@ -1415,7 +1647,7 @@ function dropStrayBridges(ctx) {
     const good = okCell();
     const out = [];
     for (const r of ctx.roads) {
-      if (r.k === 'bridge') { out.push(r); continue; }
+      if (r.k === 'bridge' || r.z) { out.push(r); continue; }
       const w = Math.max(r.w, cell), p = r.p;
       const bad = [];
       for (let i = 0; i + 3 < p.length; i += 2) {
@@ -2184,6 +2416,7 @@ function assemble(ctx, levels) {
   const roads = ctx.roads.map(r => {
     const out = { p: r.p, w: Math.round(r.w * 10) / 10, k: r.k };
     if (r.name) out.name = r.name;
+    if (r.z) out.z = r.z;
     return out;
   });
   const buildings = ctx.buildings.map(b => {

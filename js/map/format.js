@@ -4,10 +4,13 @@ import { Rng, hashStr } from '../util/rng.js';
 import { DEFAULTS } from '../data/config.js';
 
 export const FORMAT = 'rcmap';
-export const VERSION = 1;
+export const VERSION = 2;   // v2: roads may carry z (height in tiers per vertex); flat maps are still written as v1
 export const FILE_EXT = '.rcmap.json';
 
-export const T = Object.freeze({ OPEN: 0, ROAD: 1, BLDG: 2, WATER: 3, BRIDGE: 4, PARK: 5, RUBBLE: 6, RAIL: 7 });
+// RAMP: the ground under a ramp's first deck cells (an embankment or a cutting); nobody walks on it.
+export const T = Object.freeze({ OPEN: 0, ROAD: 1, BLDG: 2, WATER: 3, BRIDGE: 4, PARK: 5, RUBBLE: 6, RAIL: 7, RAMP: 8 });
+// Road heights: z per vertex in tiers (-2, -1 tunnels, 0 ground, 1..3 decks), steps of 0.1; ramps interpolate.
+export const Z_MIN = -2, Z_MAX = 3;
 export const BUILDING_KINDS = ['res', 'com', 'ind', 'civic', 'trade', 'armory', 'rescue', 'hazard', 'landmark'];
 export const SPECIAL_KINDS = ['civic', 'trade', 'armory', 'rescue'];
 export const ROAD_KINDS = ['major', 'minor', 'path', 'rail', 'bridge'];
@@ -73,9 +76,10 @@ export function clipPolyRect(p, x0, y0, x1, y1) {
 }
 
 // Clip a flat polyline to a rectangle; returns an array of polylines (Liang-Barsky per segment).
-export function clipLineRect(p, x0, y0, x1, y1) {
+// With z (one height per vertex) it returns [{ p, z }] pieces instead, z interpolated at the cut points.
+export function clipLineRect(p, x0, y0, x1, y1, z = null) {
   const res = [];
-  let cur = null;
+  let cur = null, cz = null;
   for (let i = 0; i + 3 < p.length; i += 2) {
     const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
     const dx = bx - ax, dy = by - ay;
@@ -87,16 +91,46 @@ export function clipLineRect(p, x0, y0, x1, y1) {
         if (P[k] < 0) { if (t > t1) ok = false; else if (t > t0) t0 = t; } else { if (t < t0) ok = false; else if (t < t1) t1 = t; }
       }
     }
-    if (!ok) { if (cur) { res.push(cur); cur = null; } continue; }
+    if (!ok) { if (cur) { res.push(z ? { p: cur, z: cz } : cur); cur = null; } continue; }
     const sx = ax + dx * t0, sy = ay + dy * t0, ex = ax + dx * t1, ey = ay + dy * t1;
-    if (!cur) cur = [sx, sy];
-    else if (t0 > 0) { res.push(cur); cur = [sx, sy]; }
-    cur.push(ex, ey);
-    if (t1 < 1) { res.push(cur); cur = null; }
+    const za = z ? z[i >> 1] : 0, zb = z ? z[(i >> 1) + 1] : 0;
+    if (!cur) { cur = [sx, sy]; cz = [za + (zb - za) * t0]; }
+    else if (t0 > 0) { res.push(z ? { p: cur, z: cz } : cur); cur = [sx, sy]; cz = [za + (zb - za) * t0]; }
+    cur.push(ex, ey); cz.push(za + (zb - za) * t1);
+    if (t1 < 1) { res.push(z ? { p: cur, z: cz } : cur); cur = null; }
   }
-  if (cur) res.push(cur);
-  return res.filter(l => l.length >= 4);
+  if (cur) res.push(z ? { p: cur, z: cz } : cur);
+  return z ? res.filter(l => l.p.length >= 4) : res.filter(l => l.length >= 4);
 }
+
+// Height of a road with z at arc length s along it (0 for flat roads).
+export function zAt(road, s) {
+  const z = road && road.z, p = road && road.p;
+  if (!z || !p) return 0;
+  let acc = 0;
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    const L = Math.hypot(p[i + 2] - p[i], p[i + 3] - p[i + 1]);
+    if (s <= acc + L || i + 4 >= p.length) { const t = L > 0 ? clamp((s - acc) / L, 0, 1) : 0; return z[i >> 1] + (z[(i >> 1) + 1] - z[i >> 1]) * t; }
+    acc += L;
+  }
+  return z[0];
+}
+
+// A z array that fits p (one finite value per vertex) rounded to 0.1 and clamped; null when missing, bad or all ground.
+export function cleanZ(z, n) {
+  if (!Array.isArray(z) || z.length !== n) return null;
+  const out = new Array(n);
+  let any = false;
+  for (let i = 0; i < n; i++) {
+    const v = +z[i];
+    if (z[i] === null || z[i] === '' || !Number.isFinite(v)) return null;
+    out[i] = clamp(r1(v), Z_MIN, Z_MAX);
+    if (out[i] !== 0) any = true;
+  }
+  return any ? out : null;
+}
+
+export const hasZ = m => !!(m && Array.isArray(m.roads) && m.roads.some(r => r && Array.isArray(r.z)));
 
 // MapData polygons have no holes: fold each hole into the outer ring through a zero-width cut.
 // The cut point is where a ray from the hole's rightmost vertex first meets the ring, so it never crosses an edge.
@@ -224,6 +258,7 @@ export function validateMap(m) {
     if (!r || !checkPts(r.p, 4, 'road', i)) return;
     if (!ROAD_KINDS.includes(r.k)) err(`road ${i}: unknown kind ${r.k}`);
     if (!isNum(r.w) || r.w <= 0 || r.w > 80) err(`road ${i}: bad width`);
+    if (r.z !== undefined && (!Array.isArray(r.z) || r.z.length * 2 !== r.p.length || !r.z.every(v => isNum(v) && v >= Z_MIN && v <= Z_MAX))) err(`road ${i}: bad heights`);
   });
   m.water.forEach((x, i) => { if (x) checkPts(x.p, 6, 'water', i); });
   m.parks.forEach((x, i) => { if (x) checkPts(x.p, 6, 'park', i); });
@@ -264,7 +299,8 @@ function distToPolyEdge(p, x, y) {
 
 // ---------------------------------------------------------------- normalisation
 
-function cleanPts(p, closed, w, h) {
+// zOut (optional array) receives z[i] for every vertex kept, so heights stay in step with the points.
+function cleanPts(p, closed, z = null, zOut = null) {
   if (!Array.isArray(p)) return [];
   const out = [];
   for (let i = 0; i + 1 < p.length; i += 2) {
@@ -274,6 +310,7 @@ function cleanPts(p, closed, w, h) {
     const n = out.length;
     if (n && out[n - 2] === x && out[n - 1] === y) continue;
     out.push(x, y);
+    if (zOut) zOut.push(z[i >> 1]);
   }
   if (closed) while (out.length >= 4 && out[0] === out[out.length - 2] && out[1] === out[out.length - 1]) out.length -= 2;
   return out;
@@ -306,11 +343,18 @@ export function normalizeMap(m) {
     if (!r) continue;
     const k = ROAD_KINDS.includes(r.k) ? r.k : 'minor';
     const rw = clamp(isNum(r.w) && r.w > 0 ? r1(r.w) : ROAD_WIDTH[k], 1, 60);
-    let p = cleanPts(r.p, false);
+    // a bad height list is dropped to ground rather than failing the map
+    const z0 = Array.isArray(r.p) && Array.isArray(r.z) ? cleanZ(r.z, r.p.length >> 1) : null;
+    const zk = z0 ? [] : null;
+    let p = cleanPts(r.p, false, z0, zk);
     if (p.length < 4) continue;
     const bb = polyBBox(p);
-    const pieces = bb[0] < 0 || bb[1] < 0 || bb[2] > w || bb[3] > h ? clipLineRect(p, 0, 0, w, h).map(q => cleanPts(q, false)) : [p];
-    for (const q of pieces) {
+    const out0 = bb[0] < 0 || bb[1] < 0 || bb[2] > w || bb[3] > h;
+    let pieces;
+    if (!out0) pieces = [{ p, z: zk }];
+    else if (zk) pieces = clipLineRect(p, 0, 0, w, h, zk).map(q => { const zz = []; return { p: cleanPts(q.p, false, q.z, zz), z: zz }; });
+    else pieces = clipLineRect(p, 0, 0, w, h).map(q => ({ p: cleanPts(q, false), z: null }));
+    for (const { p: q, z: qz } of pieces) {
       if (q.length < 4) continue;
       let len = 0;
       for (let i = 0; i + 3 < q.length; i += 2) len += Math.hypot(q[i + 2] - q[i], q[i + 3] - q[i + 1]);
@@ -318,6 +362,8 @@ export function normalizeMap(m) {
       const o = { p: q, w: rw, k };
       const nm = str(r.name, 80);
       if (nm) o.name = nm;
+      const zz = qz && cleanZ(qz, q.length >> 1);
+      if (zz) o.z = zz;
       out.roads.push(o);
     }
   }
@@ -341,6 +387,7 @@ export function normalizeMap(m) {
     out.levels.push(o);
   }
   if (!out.levels.length) out.levels = makeStages(w, h, 3, { seed: out.seed });
+  out.v = hasZ(out) ? 2 : 1;
   for (const s of Array.isArray(m.spawns) ? m.spawns : []) {
     if (Array.isArray(s) && isNum(+s[0]) && isNum(+s[1])) out.spawns.push([clamp(r1(+s[0]), 0, w), clamp(r1(+s[1]), 0, h)]);
   }
@@ -355,7 +402,7 @@ const KEYS = ['format', 'v', 'name', 'author', 'desc', 'welcome', 'source', 'see
 export function serializeMap(m) {
   const o = {};
   for (const k of KEYS) if (m[k] !== undefined) o[k] = m[k];
-  o.format = FORMAT; o.v = VERSION;
+  o.format = FORMAT; o.v = hasZ(m) ? 2 : 1;
   return JSON.stringify(o);
 }
 

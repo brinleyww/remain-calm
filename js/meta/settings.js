@@ -29,6 +29,7 @@ export const ACTIONS = [
   { id: 'viewHeights', label: 'Heights view', group: 'View' },
   { id: 'viewSpecials', label: 'Specials view', group: 'View' },
   { id: 'viewRanges', label: 'Range rings', group: 'View' },
+  { id: 'viewDecks', label: 'Fade overpasses', group: 'View' },
   { id: 'fitStage', label: 'Fit stage', group: 'View' },
   { id: 'panUp', label: 'Pan up', group: 'View', anyMods: true },
   { id: 'panDown', label: 'Pan down', group: 'View', anyMods: true },
@@ -46,7 +47,7 @@ export const DEFAULT_KEYS = {
   ability1: ['F1', 'Shift+Digit1'], ability2: ['F2', 'Shift+Digit2'], ability3: ['F3', 'Shift+Digit3'], ability4: ['F4', 'Shift+Digit4'],
   ability5: ['F5', 'Shift+Digit5'], ability6: ['F6', 'Shift+Digit6'], ability7: ['F7', 'Shift+Digit7'], ability8: ['F8', 'Shift+Digit8'],
   orderMove: ['KeyM'], orderHunt: ['KeyH'], orderHold: ['KeyK'], orderReturn: ['KeyZ'],
-  viewHeights: ['KeyV'], viewSpecials: ['KeyC'], viewRanges: ['KeyR'], fitStage: ['Home'],
+  viewHeights: ['KeyV'], viewSpecials: ['KeyC'], viewRanges: ['KeyR'], viewDecks: ['KeyL'], fitStage: ['Home'],
   panUp: ['KeyW', 'ArrowUp'], panDown: ['KeyS', 'ArrowDown'], panLeft: ['KeyA', 'ArrowLeft'], panRight: ['KeyD', 'ArrowRight'],
 };
 

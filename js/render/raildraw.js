@@ -99,14 +99,20 @@ function tracePts(ctx, q) {
 const boxHit = (x, y, r, x0, y0, x1, y1) => !(x + r < x0 || x - r > x1 || y + r < y0 || y - r > y1);
 
 // list: road indices found for this region (maprender's road query). Transform is set to S here.
-export function drawRails(ctx, cache, list, S, ox, oy, qx0, qy0, qx1, qy1) {
+// lev: which level stretches to draw (0 on the ground; 1 on viaducts, from the deck layer; tunnels are drawn as tunnels).
+export function drawRails(ctx, cache, list, S, ox, oy, qx0, qy0, qx1, qy1, lev = 0) {
   const net = railNetOfCache(cache);
   if (!net.lines.length) return;
   const st = cache.style, pal = st.pal, px = st.px, c = railColours(pal), u = 1 / S;
   const far = S < 1.6 * px, skip = far ? farSkip(net, S, px) : null;
   const lines = SCR.lines;
   lines.length = 0;
-  for (let k = 0; k < list.length; k++) { const li = net.byRoad[list[k]]; if (li >= 0 && !(skip && skip[li])) lines.push(li); }
+  for (let k = 0; k < list.length; k++) {
+    const li = net.byRoad[list[k]];
+    if (li < 0) continue;
+    const all = net.more && net.more.get(list[k]);
+    for (const lj of all || [li]) if (net.lines[lj].lev === lev && !(skip && skip[lj])) lines.push(lj);
+  }
   lines.sort((a, b) => a - b);
   const runsOf = [];
   for (const li of lines) {

@@ -1,5 +1,5 @@
 // Editor document + checks (DOM-free). Run: node test/editor_model.mjs
-import { EditorDoc, findSnap, resizedMap, rectFrom, translated, rotated, cloneMap } from '../js/ui/editor_model.js';
+import { EditorDoc, findSnap, resizedMap, rectFrom, translated, rotated, cloneMap, cloneItem, insertVertex, removeVertex, setRoadLevel, addRamp } from '../js/ui/editor_model.js';
 import { checkMap, stageInfo } from '../js/ui/editor_check.js';
 import { emptyMap, makeStages, serializeMap, parseMap, normalizeMap } from '../js/map/format.js';
 import { generateCity } from '../js/map/citygen.js';
@@ -137,6 +137,33 @@ const t1 = Date.now();
 cdoc.index();
 const hits = cdoc.pickAll(city.w / 2, city.h / 2, 5);
 ok(Date.now() - t1 < 400 && Array.isArray(hits), `index + pick on ${city.buildings.length} buildings in ${Date.now() - t1} ms`);
+
+// ---------------- road levels
+{
+  const road = { p: [0, 100, 100, 100, 300, 100], w: 8, k: 'major', z: [0, 1, 1] };
+  const c = cloneItem(road);
+  ok(c.z && c.z !== road.z && c.z.join() === '0,1,1' && !('z' in cloneItem({ p: [0, 0, 1, 1], w: 6, k: 'minor' })), 'cloneItem copies heights, and adds none to flat roads');
+  const ins = insertVertex(road, 0, 50, 100);
+  ok(ins.p.length === 8 && ins.z.join() === '0,0.5,1,1', 'inserting a node interpolates its height');
+  const rem = removeVertex(ins, 2);
+  ok(rem.p.join() === road.p.join() && rem.z.join() === '0,1,1', 'removing a node drops its height');
+  ok(!('z' in removeVertex({ p: [0, 0, 10, 0, 20, 0], w: 6, k: 'minor', z: [0, 1, 0] }, 2)), 'a road left all on the ground loses its heights');
+  const deck = setRoadLevel({ p: [0, 0, 200, 0, 400, 0], w: 8, k: 'major' }, 1);
+  ok(deck.z.join() === '1,1,1' && !('z' in setRoadLevel(deck, 0)), 'Level sets every node, Ground removes the heights');
+  const r1 = addRamp(deck, 0, 60);
+  ok(r1.p.length === 8 && r1.p[2] === 60 && r1.z.join() === '0,1,1,1', 'a ramp at the start inserts a node 60 m in and grounds the start');
+  const r2 = addRamp(r1, 1, 90, 0);
+  ok(r2.p.length === 10 && r2.z[r2.z.length - 1] === 0 && r2.p[r2.p.length - 4] === 310 && r2.z[r2.z.length - 2] === 1, 'a ramp at the end does the same at the other end');
+  const r3 = addRamp(setRoadLevel({ p: [0, 0, 400, 0], w: 8, k: 'major' }, 2), 0, 100, 1);
+  ok(r3.z.join() === '1,2,2', 'a ramp can end at the height of the road it meets');
+  const big = { ...emptyMap(1000, 1000, 'Levels'), roads: [{ p: [500, 100, 1500, 100], w: 8, k: 'major', z: [0, 2] }] };
+  const small = resizedMap(normalizeMap(big), 800, 800);
+  ok(small.roads[0].p[2] === 800 && Math.abs(small.roads[0].z[1] - 0.6) < 1e-9, 'resizing the sheet clips heights with the road');
+  const lm = normalizeMap({ ...emptyMap(1000, 1000, 'Checks'), buildings: [{ p: rectFrom(600, 600, 700, 700), h: 10, k: 'res' }],
+    roads: [{ p: [100, 300, 400, 300], w: 8, k: 'major', z: [0, 1] }, { p: [100, 500, 120, 500, 300, 500], w: 8, k: 'major', z: [0, 1, 1] }, { p: [650, 500, 650, 800], w: 8, k: 'minor', z: [-1, 0] }] });
+  const w = checkMap(lm).warnings.map(x => x.msg);
+  ok(w.some(m => /Road 1 ends in mid-air/.test(m)) && w.some(m => /Road 2 has a ramp steeper/.test(m)) && w.some(m => /Road 3 meets the ground inside a building/.test(m)), 'checks: mid-air deck end, steep ramp, ramp in a building');
+}
 
 console.log(fails ? `editor_model: ${fails} FAILED` : 'editor_model: all passed');
 if (fails) process.exitCode = 1;

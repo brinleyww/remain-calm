@@ -1,5 +1,5 @@
 // COMBAT performance: a generated 3 km city with a large defence (hundreds of units, traps, lines) and vehicles in battle.
-// Usage: node test/combat_bench.mjs [--ticks N]
+// Usage: node test/combat_bench.mjs [--ticks N] [--flat (the city without its motorway)]
 import { World, TYPE } from '../js/sim/world.js';
 import { DEFAULTS } from '../js/data/config.js';
 import { generateCity } from '../js/map/citygen.js';
@@ -7,7 +7,7 @@ import { installCombat } from '../js/sim/units.js';
 
 const args = process.argv.slice(2);
 const ticks = +(args[args.indexOf('--ticks') + 1] || 0) || 1200;
-const map = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.8, stages: 5 });
+const map = generateCity({ seed: 7, sizeKm: 3, water: 'river', density: 0.8, stages: 5, motorways: !args.includes('--flat') });
 const world = installCombat(new World(map, {
   seed: 42, stage: map.levels.length - 1, sandbox: true,
   mutators: ['population.scale=1.3', 'outbreak.zombies=700', 'sim.maxAgents=90000', ...Object.keys(DEFAULTS.abilities).map((id) => `abilities.${id}.unlock=0`)],

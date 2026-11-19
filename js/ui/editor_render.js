@@ -1,6 +1,7 @@
 // Editor drawing: keeps the static map cache in step with edits and draws the drafting overlays
 // (selection, handles, outbreak points, stage labels, previews) in screen space on top of drawStatic.
 import { makeStaticCache, getStaticCache } from '../render/maprender.js';
+import { forgetLevels, splitByTier } from '../render/deckrender.js';
 import { FONT_MONO, FONT_LABEL, rgba } from '../render/palette.js';
 import { polyBBox } from '../util/geom.js';
 
@@ -11,6 +12,7 @@ const now = () => performance.now();
 export function refreshCache(map, rects, full) {
   const t0 = now();
   const old = getStaticCache(map);
+  forgetLevels(map);
   const fresh = makeStaticCache(map, null);
   const reuse = !full && old && old !== fresh && old.style && old.iw === fresh.iw && old.ih === fresh.ih && rects && rects.length;
   if (reuse) {
@@ -26,6 +28,34 @@ export function refreshCache(map, rects, full) {
     for (const r of rects) fresh.invalidate([r[0] - 8, r[1] - 8, r[2] + 8, r[3] + 8]);
   }
   return now() - t0;
+}
+
+// Levels view: every road with heights tinted by level (tunnels dashed blue, decks amber / orange / red by tier),
+// with the height of each node written beside it when zoomed in.
+export function drawLevels(ctx, cam, map, pal) {
+  const z = cam.zoom, cols = { '-2': pal.carbon, '-1': pal.carbon, 1: pal.amber, 2: '#D9662B', 3: pal.stamp };
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const r of map.roads) {
+    if (!r.z) continue;
+    for (const pc of splitByTier(r.p, r.z)) {
+      if (!pc.tier) continue;
+      ctx.beginPath();
+      tracePath(ctx, cam, pc.p, false);
+      ctx.setLineDash(pc.tier < 0 ? [6, 4] : []);
+      ctx.strokeStyle = cols[pc.tier];
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = Math.max(3, (r.w || 6) * z * 0.45);
+      ctx.stroke();
+    }
+    if (z >= 0.8) {
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      for (let k = 0; k < r.p.length; k += 2) label(ctx, (r.z[k >> 1] > 0 ? '+' : '') + r.z[k >> 1], (r.p[k] - cam.x) * z, (r.p[k + 1] - cam.y) * z, pal, { dx: 6, dy: -20, font: `600 10px ${FONT_MONO}` });
+    }
+  }
+  ctx.restore();
 }
 
 // ---------------------------------------------------------------- screen-space path helpers

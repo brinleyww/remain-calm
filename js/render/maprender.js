@@ -7,6 +7,7 @@ import { hash2, mulberry32 } from '../util/rng.js';
 import { T, ROAD_WIDTH, clipPolyRect } from '../map/format.js';
 import { getPalette, heightClass, mix, SPECIAL_CODES, FONT_MONO, FONT_LABEL, BUILDING_KIND_ORDER } from './palette.js';
 import { drawRails } from './raildraw.js';
+import { roadLevels, drawTunnels } from './deckrender.js';
 
 const TILE = 256;
 const IDX = 128;
@@ -296,11 +297,13 @@ class StaticCache {
     const rk = (this.rk = new Uint8Array(nr)), rw = (this.rw = new Float32Array(nr));
     const bridges = [];
     for (let r = 0; r < nr; r++) {
-      const k = RK[R[r].k] ?? 1;
+      // a bridge road with heights is drawn as a road: its decks go on the deck layer
+      const k = R[r].k === 'bridge' && R[r].z ? RK.major : RK[R[r].k] ?? 1;
       rk[r] = k;
       rw[r] = R[r].w > 0 ? R[r].w : ROAD_W[k];
       if (k === RK.bridge) bridges.push(r);
     }
+    this.levels = roadLevels(m);
     const order = Array.from({ length: nr }, (_, i) => i).sort((a, b) => rk[a] - rk[b] || rw[a] - rw[b] || a - b);
     this.rRank = new Int32Array(nr);
     order.forEach((r, i) => { this.rRank[r] = i; });
@@ -442,6 +445,7 @@ class StaticCache {
   _gbDead(id) {
     const w = this.world;
     if (w && w.bridges && w.bridges[id]) return w.bridges[id].alive === false;
+    if (this.grid.bridges[id].deck) return false;
     const g = this.grid, cells = g.bridges[id].cells;
     let c = 0;
     for (let k = 0; k < cells.length; k++) if (g.terrain[cells[k]] === T.BRIDGE) c++;
@@ -584,6 +588,7 @@ class StaticCache {
     this._bridges(ctx, S, ox, oy, x0 - mg, y0 - mg, x1 + mg, y1 + mg);
     this._rubble(ctx, S, ox, oy, x0 - mg, y0 - mg, x1 + mg, y1 + mg);
     this._buildings(ctx, S, ox, oy, x0 - mg - this.maxShX, y0 - mg - this.maxShY, x1 + mg, y1 + mg, pw, ph);
+    drawTunnels(ctx, this, S, ox, oy, x0 - mg, y0 - mg, x1 + mg, y1 + mg);
     this._labels(ctx, S, ox, oy, pw, ph);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     usePattern(ctx, st.pats.grain, -ox, -oy);
@@ -712,7 +717,8 @@ class StaticCache {
       if (k === RK.bridge || k === RK.rail) continue;
       if (!cur || cur.k !== k || cur.w !== rw[r]) { cur = { k, w: rw[r], path: new Path2D() }; groups.push(cur); }
       const p = R[r].p;
-      if (p.length >= 4) lineTo(cur.path, p);
+      if (R[r].z) { for (const q of this.levels.ground.get(r) || []) lineTo(cur.path, q); }
+      else if (p.length >= 4) lineTo(cur.path, p);
     }
     const u = 1 / S;
     ctx.setTransform(S, 0, 0, S, -ox, -oy);
@@ -836,7 +842,7 @@ class StaticCache {
     ctx.setTransform(S, 0, 0, S, -ox, -oy);
     ctx.beginPath();
     for (let id = 0; id < this.gbAlive.length; id++) {
-      if (this.gbAlive[id] || this.gbMapped[id]) continue;
+      if (this.gbAlive[id] || this.gbMapped[id] || g.bridges[id].deck) continue;
       if (gx[id * 4] > qx1 || gx[id * 4 + 2] < qx0 || gx[id * 4 + 1] > qy1 || gx[id * 4 + 3] < qy0) continue;
       for (const c of g.bridges[id].cells) ctx.rect((c % g.gw) * cell, ((c / g.gw) | 0) * cell, cell + 0.05, cell + 0.05);
       any = true;

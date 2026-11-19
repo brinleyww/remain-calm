@@ -2,6 +2,7 @@
 import { T } from '../map/format.js';
 import { DEFAULTS } from '../data/config.js';
 import { rasterPoly, rasterSeg, polyArea, polyCentroid, clamp } from '../util/geom.js';
+import { makeDeckCollector, collectZRoad, buildDecks } from './decks.js';
 
 export function buildGrid(map, cell = 4, cfg = DEFAULTS) {
   const gw = Math.max(1, Math.ceil(map.w / cell));
@@ -14,7 +15,10 @@ export function buildGrid(map, cell = 4, cfg = DEFAULTS) {
   for (const pk of map.parks || []) if (pk.p && pk.p.length >= 6) rasterPoly(pk.p, cell, gw, gh, (c) => { terrain[c] = T.PARK; });
   for (const wt of map.water || []) if (wt.p && wt.p.length >= 6) rasterPoly(wt.p, cell, gw, gh, (c) => { terrain[c] = T.WATER; });
 
-  for (const rd of map.roads || []) {
+  const roads = map.roads || [];
+  const zcol = roads.some((r) => r && r.z) ? makeDeckCollector(roads.length) : null;
+  for (let ri = 0; ri < roads.length; ri++) {
+    const rd = roads[ri];
     const p = rd.p;
     if (!p || p.length < 4) continue;
     const code = rd.k === 'rail' ? T.RAIL : T.ROAD;
@@ -27,6 +31,7 @@ export function buildGrid(map, cell = 4, cfg = DEFAULTS) {
       if (isBridge && t === T.WATER) terrain[c] = T.BRIDGE;
       else if (code === T.ROAD || t !== T.ROAD) terrain[c] = code;
     };
+    if (zcol && rd.z) { collectZRoad(zcol, ri, rd, w, cell, gw, gh, put, code === T.RAIL); continue; }
     for (let i = 0; i + 3 < p.length; i += 2) rasterSeg(p[i], p[i + 1], p[i + 2], p[i + 3], w, cell, gw, gh, put);
   }
 
@@ -125,7 +130,9 @@ export function buildGrid(map, cell = 4, cfg = DEFAULTS) {
     return m;
   }
 
-  return { cell, gw, gh, terrain, bldg, bridgeId, bInfo, bridges, waterBodies: { id: wid, area: warea }, levelMask };
+  // multi-level roads: decks and tunnels (null on flat maps); deck structures follow the water bridges in `bridges`
+  const deck = zcol ? buildDecks(map, { gw, gh, cell, terrain, bridges }, zcol, cfg) : null;
+  return { cell, gw, gh, terrain, bldg, bridgeId, bInfo, bridges, waterBodies: { id: wid, area: warea }, levelMask, deck };
 }
 
 function measureBridge(cells, gw, cell, bcfg) {

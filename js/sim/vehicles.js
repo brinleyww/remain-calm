@@ -209,7 +209,7 @@ function fly(v, tx, ty, spd, dt) {
 function crush(world, v, r, dmg, key) {
   if (!zombiesNear(world, v.x, v.y, r)) return;
   const hits = [];
-  world.query(v.x, v.y, r, M_ZOMBIE, (i) => { hits.push(i); });
+  world.query(v.x, v.y, r, M_ZOMBIE, (i) => { hits.push(i); }, 0);
   for (const i of hits) if (world.A.type[i] === ZOMBIE && world.damageAgent(i, dmg, key)) v.kills++;
 }
 
@@ -218,7 +218,7 @@ function scratched(world, v, dt) {
   const A = world.A, zc = world.cfg.zombie;
   const giantMul = (world.cfg.mutation.kinds.giant && world.cfg.mutation.kinds.giant.wallDpsMul) || 1;
   let n = 0;
-  world.query(v.x, v.y, zc.touchRadius + VEH_R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; });
+  world.query(v.x, v.y, zc.touchRadius + VEH_R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; }, 0);
   if (!n) return;
   v.hp -= zc.wallDps * dt * n;
   if (v.hp <= 0) destroyVehicle(world, v);
@@ -262,7 +262,7 @@ export function loadCivs(world, v, a, dt) {
   v.acc = Math.min((v.acc || 0) + a.loadPerSec * dt, 3);
   let got = false;
   while (v.acc >= 1 && v.loaded < a.capacity) {
-    const i = world.nearest(v.x, v.y, a.loadRadius, M_CIV);
+    const i = world.nearest(v.x, v.y, a.loadRadius, M_CIV, 0);
     if (i < 0) break;
     if (!world.evacuate(i)) break;
     v.loaded++; v.acc -= 1; v.lastLoad = world.t; got = true;

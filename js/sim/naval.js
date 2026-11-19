@@ -579,7 +579,7 @@ function hullDamage(world, v, dt) {
     const dx = A.x[i] - v.x, dy = A.y[i] - v.y, a = dx * hx + dy * hy, p = dy * hx - dx * hy;
     if (a > L || a < -L || p > B || p < -B) return;
     n += A.sub[i] === ZSUB.GIANT ? giant : 1;
-  });
+  }, 0);
   if (!n) return;
   v.hp -= zc.wallDps * dt * n;
   v.hitT = world.t;

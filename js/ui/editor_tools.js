@@ -1,6 +1,6 @@
 // Editor tools. Each tool gets pointer events in world metres (ev.x, ev.y) and screen px (ev.sx, ev.sy)
 // and draws its own preview in screen space. `ed` is the editor context built in editor.js.
-import { cloneItem, translated, rotated, rectFrom, findSnap, constrainAngle, polylineLength, itemBBox, COLL_LABEL } from './editor_model.js';
+import { cloneItem, translated, rotated, rectFrom, findSnap, constrainAngle, polylineLength, itemBBox, COLL_LABEL, insertVertex, removeVertex } from './editor_model.js';
 import { tracePath, handle, label, fmtM, fmtM2, outlineItem, vertexHandles, drawSpawn } from './editor_render.js';
 import { polyArea } from '../util/geom.js';
 import { DEFAULT_USE } from '../map/format.js';
@@ -206,8 +206,10 @@ const SELECT = {
     if (s.length !== 1 || s[0].coll === 'spawns') return;
     const e = ed.doc.edgeAt(s[0].coll, s[0].idx, ev.x, ev.y, ed.px(8));
     if (!e) return;
-    const it = cloneItem(ed.doc.map[s[0].coll][s[0].idx]);
-    it.p.splice(e.k + 2, 0, r1(e.x), r1(e.y));
+    const src = ed.doc.map[s[0].coll][s[0].idx];
+    let it;
+    if (src.z) it = insertVertex(src, e.k, e.x, e.y);
+    else { it = cloneItem(src); it.p.splice(e.k + 2, 0, r1(e.x), r1(e.y)); }
     ed.doc.set(s[0].coll, s[0].idx, it);
   },
   right(ed, ev) {
@@ -215,9 +217,11 @@ const SELECT = {
     if (s.length === 1 && s[0].coll !== 'spawns') {
       const v = ed.doc.vertexAt(s[0].coll, s[0].idx, ev.x, ev.y, ed.px(7));
       if (v) {
-        const it = cloneItem(ed.doc.map[s[0].coll][s[0].idx]);
-        if (it.p.length - 2 < MIN_PTS[s[0].coll]) { ed.toast(`A ${COLL_LABEL[s[0].coll].toLowerCase()} needs at least ${MIN_PTS[s[0].coll] / 2} points`, 'warn'); return; }
-        it.p.splice(v.k, 2);
+        const src = ed.doc.map[s[0].coll][s[0].idx];
+        if (src.p.length - 2 < MIN_PTS[s[0].coll]) { ed.toast(`A ${COLL_LABEL[s[0].coll].toLowerCase()} needs at least ${MIN_PTS[s[0].coll] / 2} points`, 'warn'); return; }
+        let it;
+        if (src.z) it = removeVertex(src, v.k);
+        else { it = cloneItem(src); it.p.splice(v.k, 2); }
         ed.doc.set(s[0].coll, s[0].idx, it);
         return;
       }

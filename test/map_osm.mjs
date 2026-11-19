@@ -2,6 +2,7 @@
 import { osmToMap, overpassQuery, areaBBox, specialFromTags, isHugeMap, isPrivateGarden, OSM_ATTRIBUTION } from '../js/map/osm.js';
 import { validateMap, mapStats } from '../js/map/format.js';
 import { pointInPoly } from '../js/util/geom.js';
+import { buildGrid } from '../js/sim/raster.js';
 
 let fails = 0, passes = 0;
 const ok = (cond, msg) => { if (cond) passes++; else { fails++; console.error('FAIL', msg); } };
@@ -91,7 +92,7 @@ ok(!inWater(750, 660), 'river buffer has its width, not more');
 const road = name => map.roads.filter(r => r.name === name);
 ok(road('Long Road').length === 1 && road('Long Road')[0].k === 'major' && road('Long Road')[0].w === 14, 'primary -> major 14 m, clipped');
 ok(road('Cross Street')[0]?.k === 'minor', 'residential -> minor');
-ok(road('Under Pass').length === 0, 'tunnel dropped');
+ok(road('Under Pass').length === 1 && Math.min(...road('Under Pass')[0].z) === -1 && road('Under Pass')[0].k === 'major', 'tunnel kept underground (z -1)');
 ok(road('River Bridge')[0]?.k === 'bridge', 'bridge over water -> bridge');
 ok(road('Land Viaduct')[0]?.k === 'minor', 'bridge over land stays a road');
 ok(map.roads.some(r => r.k === 'path'), 'footway -> path');
@@ -336,6 +337,71 @@ ok(validateMap(osmToMap({ elements: [] }, { lat: 0, lon: 0, sizeKm: 0.5 })).ok, 
     const wet = (x, y) => m.water.some(w => pointInPoly(w.p, x, y));
     ok(wet(800, 500) && wet(900, 100) && !wet(300, 500) && !wet(580, 200), `cropped lake closed on the water side (member reversed: ${rev})`);
   }
+}
+
+// ---------------- multi-level roads: bridges over roads become decks, links and chain ends ramp, tunnels go under
+{
+  const E = [];
+  let nn = 100000, ww = 50000;
+  const P = new Map();
+  const pt = (x, y) => { const id = nn++; P.set(id, [x, y]); E.push({ type: 'node', id, ...ll(x, y) }); return id; };
+  const lw = (ids, tags) => { E.push({ type: 'way', id: ww++, nodes: ids, geometry: ids.map(i => ll(...P.get(i))), tags }); };
+  // a: bridge over a street, plain roads at both ends
+  const a1 = pt(100, 500), a2 = pt(300, 500), a3 = pt(500, 500), a4 = pt(700, 500);
+  lw([a1, a2], { highway: 'secondary', name: 'West Approach' });
+  lw([a2, pt(400, 500), a3], { highway: 'secondary', bridge: 'yes', layer: '1', name: 'Over Bridge' });
+  lw([a3, a4], { highway: 'secondary', name: 'East Approach' });
+  lw([pt(400, 300), pt(400, 760)], { highway: 'residential', name: 'Under Street' });
+  // b: bridge over water only
+  E.push({ type: 'way', id: ww++, nodes: [], geometry: geom([0, 150, 1000, 150, 1000, 250, 0, 250, 0, 150]), tags: { natural: 'water' } });
+  const b1 = pt(600, 100), b2 = pt(600, 300);
+  lw([pt(600, 40), b1], { highway: 'tertiary', name: 'North Quay Road' });
+  lw([b1, b2], { highway: 'tertiary', bridge: 'yes', name: 'Water Bridge' });
+  lw([b2, pt(600, 340)], { highway: 'tertiary', name: 'South Quay Road' });
+  // c: motorway bridge over a road with a link ramp down to the ground at one end
+  const c0 = pt(20, 820), c1 = pt(100, 820), c2 = pt(300, 820), c3 = pt(450, 820);
+  lw([c0, c1], { highway: 'motorway', name: 'Motorway West' });
+  lw([c1, pt(200, 820), c2], { highway: 'motorway', bridge: 'yes', layer: '1', name: 'Motorway Viaduct' });
+  lw([c2, pt(375, 820), c3], { highway: 'motorway_link', name: 'Slip Road' });
+  lw([c3, pt(600, 820)], { highway: 'primary', name: 'Slip Street' });
+  lw([pt(200, 760), pt(200, 900)], { highway: 'residential', name: 'Low Lane' });
+  // d: a tunnel under a street
+  const d1 = pt(0, 650), d2 = pt(150, 650), d3 = pt(470, 650), d4 = pt(600, 650);
+  lw([d1, d2], { highway: 'primary', name: 'Tunnel West' });
+  lw([d2, pt(300, 650), d3], { highway: 'primary', tunnel: 'yes', name: 'Deep Tunnel' });
+  lw([d3, d4], { highway: 'primary', name: 'Tunnel East' });
+  // e..h: ground, dropped and stacked ways
+  lw([pt(700, 600), pt(900, 600)], { highway: 'service', layer: '-1', name: 'Sunk Lane' });
+  lw([pt(700, 640), pt(900, 640)], { highway: 'footway', covered: 'yes', name: 'Arcade' });
+  lw([pt(700, 680), pt(900, 680)], { highway: 'service', tunnel: 'building_passage', name: 'Passage' });
+  lw([pt(700, 720), pt(900, 720)], { highway: 'service', service: 'parking_aisle', layer: '-1', name: 'Garage Aisle' });
+  lw([pt(700, 740), pt(900, 740)], { highway: 'footway', indoor: 'yes', name: 'Mall Walk' });
+  lw([pt(700, 760), pt(900, 760)], { highway: 'footway', level: '1', name: 'Gallery' });
+  lw([pt(820, 560), pt(820, 960)], { highway: 'residential', name: 'Stack Street' });
+  lw([pt(780, 900), pt(860, 900)], { highway: 'primary', bridge: 'yes', layer: '5', name: 'High Stack' });
+  lw([pt(780, 940), pt(860, 940)], { highway: 'primary', bridge: 'yes', layer: '2', name: 'Mid Stack' });
+  lw([pt(50, 980), pt(300, 980)], { railway: 'rail', bridge: 'yes', name: 'Rail Viaduct' });
+  lw([pt(50, 960), pt(300, 960)], { railway: 'rail', tunnel: 'yes', name: 'Rail Tunnel' });
+  const m = osmToMap({ elements: E }, { lat: LAT, lon: LON, sizeKm: 1, stages: 3, name: 'Levels' });
+  ok(validateMap(m).ok, 'levels fixture is a valid map');
+  const R1 = (name) => m.roads.filter(r => r.name === name);
+  const zmax = (name) => Math.max(...R1(name).flatMap(r => r.z || [0])), zmin = (name) => Math.min(...R1(name).flatMap(r => r.z || [0]));
+  const ob = R1('Over Bridge')[0];
+  ok(ob && ob.z && ob.z[0] === 0 && ob.z[ob.z.length - 1] === 0 && zmax('Over Bridge') === 1 && ob.k === 'major', 'a bridge over a street is a deck that ramps down at both ends');
+  ok(!R1('Under Street')[0].z && !R1('West Approach')[0].z, 'the street under it and the plain approaches stay on the ground');
+  ok(R1('Water Bridge')[0].k === 'bridge' && !R1('Water Bridge')[0].z, 'a bridge over water only stays a level-0 water bridge');
+  const mv = R1('Motorway Viaduct')[0], sl = R1('Slip Road')[0];
+  ok(mv && mv.z && mv.z[0] === 0 && mv.z[mv.z.length - 1] === 1, 'the viaduct ramps at the plain end and stays up where the link meets it');
+  ok(sl && sl.z && sl.z[0] === 1 && sl.z[sl.z.length - 1] === 0 && sl.z.length >= 2, 'the link road slopes from the deck down to the ground');
+  ok(zmin('Deep Tunnel') === -1 && R1('Deep Tunnel')[0].z[0] === 0, 'a tunnel goes under (z -1) and ramps up at its ends');
+  ok(R1('Sunk Lane').length === 1 && !R1('Sunk Lane')[0].z, 'layer -1 without a tunnel is ground');
+  ok(R1('Arcade').length === 1 && !R1('Arcade')[0].z && R1('Passage').length === 1 && !R1('Passage')[0].z, 'covered ways and building passages are ground');
+  ok(!R1('Garage Aisle').length && !R1('Mall Walk').length && !R1('Gallery').length, 'parking aisles below ground, indoor ways and upper levels are dropped');
+  ok(zmax('High Stack') === 3 && zmax('Mid Stack') === 2, 'layers 2..5 stack up to tier 3');
+  const railAt = (y) => m.roads.find(r => r.k === 'rail' && Math.abs(r.p[1] - y) < 1);
+  ok(Math.max(...railAt(980).z) === 1 && Math.min(...railAt(960).z) === -1, 'rail bridges go up and rail tunnels down (scenery)');
+  const g = buildGrid(m, 4);
+  ok(g.deck && g.deck.D > 0 && g.deck.portals.length >= 4 && g.bridges.filter(b => b.deck).length >= 2, `the deck grid has nodes (${g.deck && g.deck.D}), portals and deck structures`);
 }
 
 console.log(`map_osm: ${passes} passed, ${fails} failed`);

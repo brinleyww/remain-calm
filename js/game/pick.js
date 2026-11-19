@@ -3,6 +3,7 @@
 import { distToPolyline, distToSeg, pointInPoly, polyCentroid } from '../util/geom.js';
 
 const M_ARMED = (1 << 4) | (1 << 5) | (1 << 6);
+const ALL_TIERS = 100;   // world.query's TIER_ALL (kept as a number so this module stays free of sim imports)
 // Hit radii: px on screen, never smaller than the metres given (a gate's posts reach 6 m either side of the wall).
 export const HIT = { unitPx: 12, unitM: 3, gatePx: 9, gateM: 6, wallPx: 8, linePx: 8, lineM: 2, troopPx: 9, troopM: 3, vehPx: 12 };
 // A second click within this distance and time of the last one takes the next thing under the cursor.
@@ -99,12 +100,16 @@ export function pickList(world, wx, wy, o = {}) {
   }
   if (troops) {
     const A = world.A, r = Math.max(HIT.troopM, HIT.troopPx / z), best = new Map();
+    // on maps with decks: the squad on the highest tier first; in a tunnel only your own squads can be picked
+    const TR = world.grid && world.grid.deck ? A.tier : null;
     if (A && A.n > 0 && world.sh) world.query(wx, wy, r, M_ARMED, (j, d2) => {
       const g = A.group[j];
       if (g < 0) return;
-      const d = Math.sqrt(d2) / r, e = best.get(g);
-      if (!e || d < e.d) best.set(g, { d, own: !coop || A.owner[j] === owner });
-    });
+      const own = !coop || A.owner[j] === owner;
+      if (TR && TR[j] < 0 && !own) return;
+      const d = Math.max(0, Math.sqrt(d2) / r - (TR ? TR[j] * 0.25 : 0)), e = best.get(g);
+      if (!e || d < e.d) best.set(g, { d, own });
+    }, ALL_TIERS);
     for (const [g, e] of best) {
       if (e.own) out.push({ kind: 'troop', ref: 's' + g, group: g, key: 's' + g, tier: TIER.troop, d: e.d });
       else if (!o.mine) out.push({ kind: 'squad', group: g, key: 'q' + g, tier: TIER.troop, d: e.d + PARTNER });

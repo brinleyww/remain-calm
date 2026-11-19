@@ -6,6 +6,7 @@ import { Camera } from '../render/camera.js';
 import { getPalette, applyPalette, rgba } from '../render/palette.js';
 import { drawStatic, drawScaleBar, invalidate, invalidateBuilding, invalidateBridge, pickBuilding, pickBridge } from '../render/maprender.js';
 import { WorldRenderer } from '../render/worldrender.js';
+import { deckAt } from '../sim/decks.js';
 import { Expand } from '../render/expand.js';
 import { Markers, tag } from '../render/fx.js';
 import { polyCentroid } from '../util/geom.js';
@@ -51,6 +52,7 @@ export class Session {
     this.paint = false;
     this.view = 'normal';
     this.rings = false;
+    this.fadeDecks = false;
     this.sel = null;
     this.hover = null;
     this.currentLabel = null;
@@ -534,6 +536,7 @@ export class Session {
   togglePaint() { this.paint = !this.paint; this.flash(this.paint ? 'Paint mode: drag across roofs to man every building swept' : 'Paint mode off', 'info'); }
   toggleView(v) { this.view = this.view === v ? 'normal' : v; }
   toggleRings() { this.rings = !this.rings; }
+  toggleDecks() { this.fadeDecks = !this.fadeDecks; }
 
   select(sel) {
     this.sel = sel;
@@ -664,6 +667,7 @@ export class Session {
       case 'viewHeights': this.toggleView('height'); return true;
       case 'viewSpecials': this.toggleView('specials'); return true;
       case 'viewRanges': this.toggleRings(); return true;
+      case 'viewDecks': if (!this.world.grid.deck) return false; this.toggleDecks(); return true;
       case 'undo': this.undo(); return true;
       case 'fitStage': this.fitStage(true); return true;
       default: return false;
@@ -675,7 +679,7 @@ export class Session {
     const map = this.map;
     return pickList(this.world, wx, wy, {
       zoom: this.cam.zoom, owner: this.owner,
-      pickBuilding: (x, y, dead) => pickBuilding(map, x, y, dead), pickBridge: (x, y) => pickBridge(map, x, y, 3), ...o,
+      pickBuilding: (x, y, dead) => pickBuilding(map, x, y, dead), pickBridge: (x, y) => deckAt(this.world, x, y) || pickBridge(map, x, y, 3), ...o,
     });
   }
 
@@ -796,7 +800,7 @@ export class Session {
       case 'squad': return 'Armed group';
       case 'building': { const b = w.buildings[c.b], m = this.map.buildings[c.b] || {}; return (m.name || (b && (b.use || KIND_LABEL[b.k])) || 'Building') + (b && !b.alive ? ' (collapsed)' : ''); }
       case 'zone': return `Safe zone ${c.comp + 1}`;
-      case 'bridge': return (this.map.roads[c.road] || {}).name || 'Bridge';
+      case 'bridge': return (this.map.roads[c.road] || {}).name || (this.world.bridges[c.id] && this.world.bridges[c.id].deck ? 'Overpass' : 'Bridge');
       default: return { gate: 'Gate', wall: 'Wall', corridor: 'Evac corridor', hold: 'Hold point', zonepoly: 'Safe zone' }[c.kind] || '';
     }
   }
@@ -829,6 +833,7 @@ export class Session {
     }
     if (t.kind === 'bridge') {
       const br = w.bridges[t.id];
+      if (br && br.deck) return `<p class="tooltip-title">Overpass${(this.map.roads[t.road] || {}).name ? ` <span class="tooltip-sub">${esc(this.map.roads[t.road].name)}</span>` : ''}</p>${br.alive ? kv('Structural integrity', `${Math.round(br.hp / br.hpMax * 100)}%`) : kv('State', '<span class="red">down</span>')}${kv('Deck', `level ${br.tier || 1}, ${Math.round(br.len)} m`)}`;
       return br ? `<p class="tooltip-title">${esc((this.map.roads[t.road] || {}).name || 'Bridge')}</p>${kv('Structural integrity', `${Math.round(br.hp / br.hpMax * 100)}%`)}${kv('Span', `${Math.round(br.len)} m`)}` : '';
     }
     if (t.kind === 'squad') return `<p class="tooltip-title">Armed group</p>${kv('Click', 'select')}${kv('Right-click', 'move there')}`;
@@ -963,7 +968,7 @@ export class Session {
     const t = w.t + ext + (this.fxT || 0);
     const horn = this._horn || (this._horn = (x, y) => this.onSound({ name: 'horn', x, y, vol: 0.2 }));
     const flash = this.wr.draw(ex ? ex.beginWorld(ctx) : ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: null, abilityName: (id) => this.combat.abilityName(id),
-      trains: this.prefs.get().trains !== false, turn: this.driver ? this.driver.turn : null, hold: this.modalOpen(), horn });
+      trains: this.prefs.get().trains !== false, turn: this.driver ? this.driver.turn : null, hold: this.modalOpen(), horn, fadeDecks: this.fadeDecks });
     if (ex) ex.endWorld(ctx);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.army.draw(ctx, cam, pal);

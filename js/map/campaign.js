@@ -63,7 +63,7 @@ export function getCampaignMap(id) {
   if (cache.has(id)) return cache.get(id);
   const c = getCampaignCity(id);
   if (!c) throw new Error('Unknown campaign city: ' + id);
-  const map = generateCity({ ...c.gen, name: c.name });
+  const map = generateCity({ ...c.gen, name: c.name, motorways: false });
   map.author = 'Office of Civil Preparedness';
   map.welcome = c.welcome;
   map.desc = c.blurb;

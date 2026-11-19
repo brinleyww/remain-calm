@@ -6,7 +6,7 @@ import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL } from '../map/osm.js';
 import { PALETTE_NAMES, PALETTE_LABELS } from '../render/palette.js';
 import { polyArea } from '../util/geom.js';
 import { DEFAULTS } from '../data/config.js';
-import { COLL_LABEL, polylineLength } from './editor_model.js';
+import { COLL_LABEL, polylineLength, setRoadLevel, addRamp } from './editor_model.js';
 import { stageInfo } from './editor_check.js';
 import { fmtM, fmtM2 } from './editor_render.js';
 
@@ -181,6 +181,7 @@ function selectionPanel(ed) {
     }, 'r-k')));
     out.append(field('Width (m)', numInput(w, 1, 60, 0.5, v => patchAll({ w: v }, `r-w:${sel.map(r => r.idx).join(',')}`), 'r-w', w === '' ? 'mixed' : undefined)));
     if (one) out.append(field('Name', textInput(items[0].name, v => patchAll({ name: v.trim() || undefined }, `r-name:${sel[0].idx}`), 'r-name', { placeholder: 'optional' })));
+    out.append(...levelFields(ed, sel, items));
     out.append(el('div', null, kv('Length', fmtM(items.reduce((s, r) => s + polylineLength(r.p), 0))), one ? kv('Nodes', String(items[0].p.length / 2)) : null));
   } else if (coll === 'water' || coll === 'parks') {
     out.append(el('div', null, kv('Area', fmtM2(items.reduce((s, x) => s + polyArea(x.p), 0))), one ? kv('Corners', String(items[0].p.length / 2)) : null));
@@ -189,6 +190,50 @@ function selectionPanel(ed) {
     if (one) out.append(el('div', null, kv('East', fmtM(items[0][0])), kv('South', fmtM(items[0][1]))));
   }
   out.append(actions);
+  return out;
+}
+
+// Heights of the selected roads: a level for the whole road, ramps at its ends and (one road) the height of every node.
+const LEVELS = [['-2', 'Tunnel −2'], ['-1', 'Tunnel −1'], ['0', 'Ground'], ['1', 'Deck 1'], ['2', 'Deck 2'], ['3', 'Deck 3']];
+function levelFields(ed, sel, items) {
+  const m = ed.doc.map, one = items.length === 1;
+  const lvl = r => (r.z ? String(Math.round(Math.max(...r.z.map(Math.abs))) * Math.sign(r.z.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a), 0))) : '0');
+  const cur = items.every(r => lvl(r) === lvl(items[0])) ? lvl(items[0]) : '';
+  const out = [field('Level', select([['', 'Mixed'], ...LEVELS].filter(([v]) => v !== '' || cur === ''), cur, v => {
+    ed.fromPanel(() => ed.doc.transact('Level', () => { for (const r of sel) ed.doc.set('roads', r.idx, setRoadLevel(m.roads[r.idx], +v)); }));
+    ed.panels();
+  }, 'r-level'), 'Tunnels go under everything, decks over it. A deck needs ramps to reach the ground.')];
+  if (!one) return out;
+  const r = sel[0], it = items[0];
+  const snapZ = (x, y) => {
+    for (let i = 0; i < m.roads.length; i++) {
+      const o = m.roads[i];
+      if (i === r.idx || !o.z) continue;
+      for (let k = 0; k + 3 < o.p.length; k += 2) {
+        const ax = o.p[k], ay = o.p[k + 1], dx = o.p[k + 2] - ax, dy = o.p[k + 3] - ay, l2 = dx * dx + dy * dy;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+        if (Math.hypot(ax + dx * t - x, ay + dy * t - y) < 1.5) return o.z[k >> 1] + (o.z[(k >> 1) + 1] - o.z[k >> 1]) * t;
+      }
+    }
+    return 0;
+  };
+  const ramp = end => {
+    const inp = el('input', { class: 'input', type: 'number', min: 10, max: 300, step: 5, value: 60, dataset: { key: 'r-ramp' + end } });
+    return el('div', { class: 'hstack gap-2' }, inp, btn(end ? 'Ramp at end' : 'Ramp at start', () => {
+      const len = Math.max(10, Math.min(300, parseFloat(inp.value) || 60)), p = it.p, n = p.length;
+      const zEnd = end ? snapZ(p[n - 2], p[n - 1]) : snapZ(p[0], p[1]);
+      ed.fromPanel(() => ed.doc.set('roads', r.idx, addRamp(m.roads[r.idx], end, len, zEnd)));
+      ed.panels();
+    }));
+  };
+  if (it.z) out.push(field('Ramps (m)', el('div', { class: 'vstack gap-2' }, ramp(0), ramp(1)), 'The end goes down to the ground, or to the height of the road it meets.'));
+  out.push(field('Node heights', textInput(it.z ? it.z.join(', ') : '', v => {
+    const vals = v.split(/[\s,;]+/).filter(Boolean).map(Number);
+    if (vals.length !== it.p.length / 2 || !vals.every(Number.isFinite)) return;
+    const o = setRoadLevel(it, 0);
+    if (vals.some(x => x !== 0)) o.z = vals.map(x => Math.max(-2, Math.min(3, Math.round(x * 10) / 10)));
+    ed.fromPanel(() => ed.doc.set('roads', r.idx, o));
+  }, 'r-z', { placeholder: 'ground (0 at every node)', max: 4000 }), `One height per node (${it.p.length / 2}), in levels: −2 to 3, steps of 0.1.`));
   return out;
 }
 
@@ -329,7 +374,7 @@ export function shortcutsDialog(root) {
     ['Enter', 'Finish the road or shape'], ['Backspace', 'Remove the last node'], ['Esc', 'Cancel / clear selection'], ['Shift', 'Lock to 15° / square / axis'], ['Alt', 'Place without snapping'],
     ['Del', 'Delete selection'], ['Ctrl+D', 'Duplicate selection'], ['Arrows', 'Nudge selection (Shift ×10) or pan'], ['[ ]', 'Rotate selection 5° (Shift 15°)'],
     ['Ctrl+Z', 'Undo'], ['Ctrl+Y', 'Redo'], ['Ctrl+S', 'Save to library'], ['Ctrl+E', 'Export file'],
-    ['V', 'Heights view'], ['C', 'Specials view'], ['F', 'Fit the sheet'], ['Wheel', 'Zoom'], ['Right / middle drag, Space+drag', 'Pan'], ['?', 'This card'],
+    ['V', 'Heights view'], ['C', 'Specials view'], ['L', 'Road levels view'], ['F', 'Fit the sheet'], ['Wheel', 'Zoom'], ['Right / middle drag, Space+drag', 'Pan'], ['?', 'This card'],
   ];
   const m = modal(root, 'Drafting keys', el('table', { class: 'table compact ed-keys' }, el('tbody', null,
     rows.map(([k, t]) => el('tr', null, el('td', null, k.length > 12 ? el('span', { class: 'small', text: k }) : el('kbd', { class: 'keycap', text: k })), el('td', { text: t }))))),

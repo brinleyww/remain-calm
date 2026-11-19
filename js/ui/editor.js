@@ -11,7 +11,8 @@ import { polyBBox, polyArea, pointInPoly, clamp } from '../util/geom.js';
 import { DEFAULTS } from '../data/config.js';
 import { EditorDoc, cloneMap, cloneItem, itemBBox, itemCentre, translated, rotated, resizedMap, DRAWN_COLLS } from './editor_model.js';
 import { TOOLS, TOOL_BY_ID, drawCommon } from './editor_tools.js';
-import { refreshCache, drawStageTags, drawIssuePins, drawSnap } from './editor_render.js';
+import { refreshCache, drawStageTags, drawIssuePins, drawSnap, drawLevels } from './editor_render.js';
+import { drawDecks } from '../render/deckrender.js';
 import { checkMap } from './editor_check.js';
 import { el, ensureEditorCss } from './editor_dom.js';
 import { renderItemPanel, renderStagesPanel, renderSheetPanel, renderCheckPanel, startDialog, confirmDialog, shareDialog, shortcutsDialog } from './editor_panels.js';
@@ -27,6 +28,7 @@ const ICONS = {
   spawn: '<circle cx="9" cy="9" r="4"/><path d="M9 1.5v4M9 12.5v4M1.5 9h4M12.5 9h4"/>',
   heights: '<path d="M3 16V10h3v6M7.5 16V5h3v11M12 16V8h3v8"/>',
   specials: '<circle cx="9" cy="9" r="6.5"/><circle cx="9" cy="9" r="4.2"/><path d="M10.6 7.4a2.2 2.2 0 1 0 0 3.2"/>',
+  levels: '<path d="M2 14h14M4 10.5h10M6 7h6"/><path d="M4 10.5V14M14 10.5V14M6 7v3.5M12 7v3.5"/>',
   stages: '<rect x="2.5" y="2.5" width="13" height="13" stroke-dasharray="2.4 1.6"/><rect x="6" y="6" width="6" height="6"/>',
   fit: '<path d="M2.5 6.5v-4h4M11.5 2.5h4v4M15.5 11.5v4h-4M6.5 15.5h-4v-4"/>',
 };
@@ -70,10 +72,11 @@ export function openEditor(container, opts = {}) {
   const viewBtns = {
     height: el('button', { class: 'ed-tool ed-view-btn', type: 'button', title: 'Colour by height (V)', 'aria-pressed': 'false', onclick: () => toggleView('height') }, el('span', { class: 'ed-ico', svg: icon('heights') }), el('span', { class: 'ed-tlabel', text: 'Heights' }), el('kbd', { class: 'keycap', text: 'V' })),
     specials: el('button', { class: 'ed-tool ed-view-btn', type: 'button', title: 'Show special buildings (C)', 'aria-pressed': 'false', onclick: () => toggleView('specials') }, el('span', { class: 'ed-ico', svg: icon('specials') }), el('span', { class: 'ed-tlabel', text: 'Specials' }), el('kbd', { class: 'keycap', text: 'C' })),
+    levels: el('button', { class: 'ed-tool ed-view-btn', type: 'button', title: 'Road levels: tunnels and decks by colour (L)', 'aria-pressed': 'false', onclick: () => toggleView('levels') }, el('span', { class: 'ed-ico', svg: icon('levels') }), el('span', { class: 'ed-tlabel', text: 'Levels' }), el('kbd', { class: 'keycap', text: 'L' })),
     stages: el('button', { class: 'ed-tool ed-view-btn', type: 'button', title: 'Show stage boundaries', 'aria-pressed': 'true', onclick: () => { ed.showStages = !ed.showStages; syncToolbar(); redraw(); } }, el('span', { class: 'ed-ico', svg: icon('stages') }), el('span', { class: 'ed-tlabel', text: 'Bounds' })),
     fit: el('button', { class: 'ed-tool ed-view-btn', type: 'button', title: 'Fit the sheet (F)', onclick: () => fitSheet(true) }, el('span', { class: 'ed-ico', svg: icon('fit') }), el('span', { class: 'ed-tlabel', text: 'Fit' }), el('kbd', { class: 'keycap', text: 'F' })),
   };
-  toolbar.append(el('div', { class: 'ed-tools-sep' }), viewBtns.height, viewBtns.specials, viewBtns.stages, viewBtns.fit,
+  toolbar.append(el('div', { class: 'ed-tools-sep' }), viewBtns.height, viewBtns.specials, viewBtns.levels, viewBtns.stages, viewBtns.fit,
     el('button', { class: 'ed-tool ed-help', type: 'button', title: 'Keyboard shortcuts (?)', onclick: () => shortcutsDialog(root) }, el('span', { class: 'ed-ico', text: '?' }), el('span', { class: 'ed-tlabel', text: 'Keys' })));
 
   const canvas = el('canvas', { class: 'ed-canvas' });
@@ -373,6 +376,7 @@ export function openEditor(container, opts = {}) {
     for (const t of TOOLS) toolBtns[t.id].setAttribute('aria-pressed', String(ed.tool.id === t.id));
     viewBtns.height.setAttribute('aria-pressed', String(ed.view === 'height'));
     viewBtns.specials.setAttribute('aria-pressed', String(ed.view === 'specials'));
+    viewBtns.levels.setAttribute('aria-pressed', String(ed.view === 'levels'));
     viewBtns.stages.setAttribute('aria-pressed', String(ed.showStages));
   }
 
@@ -467,6 +471,8 @@ export function openEditor(container, opts = {}) {
       allStages: ed.showStages, dimOutside: ed.tool.id === 'stage' && ed.dimOutside, hover: hoverB,
     });
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawDecks(ctx, m, null, cam, { palette: m.palette, fade: ed.view === 'levels' });
+    if (ed.view === 'levels') drawLevels(ctx, cam, m, pal);
     if (ed.showStages) drawStageTags(ctx, cam, m, ed.activeStage, pal);
     drawCommon(ctx, ed);
     if (ed.tool.draw) ed.tool.draw(ctx, ed);
@@ -628,6 +634,7 @@ export function openEditor(container, opts = {}) {
     if (/^[1-8]$/.test(k)) { setTool(TOOLS[+k - 1].id); e.preventDefault(); return; }
     if (low === 'v') { toggleView('height'); return; }
     if (low === 'c') { toggleView('specials'); return; }
+    if (low === 'l') { toggleView('levels'); return; }
     if (low === 'f' || k === 'Home') { fitSheet(true); return; }
     if (k === '?' || k === 'h' || k === 'H') { shortcutsDialog(root); return; }
   };

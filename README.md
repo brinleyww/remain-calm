@@ -4,6 +4,15 @@
 
 It runs in the browser with plain JavaScript modules. There is no build step and nothing to install. This is version 0.3.0 (`js/version.js`); the title screen shows it.
 
+## What's new: roads on more than one level
+
+- **Motorways, flyovers and tunnels.** Roads can now run above or below the street. In a real place, a bridge over a road, a path or a railway becomes a deck, a tunnel goes underground, and link roads slope up and down between them, so an expressway interchange works the way it does on the ground. A bridge that only crosses water stays the destructible bridge it always was. Generated cities of 3 km and more get a motorway (two from 6 km) on viaducts over the main roads, the railway and the water, with diamond interchanges and one underpass. Campaign cities are unchanged.
+- **People and zombies use every level.** Residents and the infected walk up the ramps, along the decks and through the tunnels. A zombie under a deck cannot reach the people on it, and the other way round. A wall or gate blocks every level of the ground it stands on, so a safe zone also owns the decks above it and the tunnels below it: a resident on a deck over the zone is safe, and a zombie there breaches it.
+- **Decks can come down.** An overpass has hit points like a bridge (explosives do double damage). When a deck falls, everyone on it falls with it, swimmers over water drop into the river, and the ground under it turns to rubble. The city rebuilds it at the next stage. A small blast hits only the level it goes off on; a big one reaches the ground and the decks; tunnels are hit only from inside, or by the nuclear strike. Paratroopers dropped over a deck land on it.
+- **On the map**, decks are drawn over the people below them, with a shadow and piers; tunnels are a dashed casing with a mark where they go under; people in tunnels show faintly. Trains disappear into rail tunnels and run over viaducts. Press **L** (or *Decks* under View) to fade the decks and see what is under them. A click takes troops on the highest level first, and hovering a deck shows *Overpass* and its structural integrity.
+- **Map editor**: a road's *Level* (tunnel, ground, deck 1 to 3), *Ramp at start / end*, and the height of every node; the *Levels* view (L) tints roads by level. *Inspect* warns about a deck that ends in mid-air, a ramp steeper than one level per 30 m, and a ramp that meets the ground inside a building.
+- **Map files**: a map whose roads have heights is saved as format version 2, which older builds cannot open. Maps without them are saved exactly as before. Rail bridges and viaducts are now scenery: nobody walks along them, and boats pass under them.
+
 ## What's new in 0.3.0
 
 - **Troop orders.** With no tool chosen, drag a box or click to select your squads (paratroopers, militia, police) and the vehicles you command (boats, armoured carrier, tank). Shift adds or drops one; a double-click takes every squad of that kind on screen. Right-click sends them there, or press M and click: squads march together, through gates, and hold the spot. H hunts, K holds where they stand, and Z sends squads back to your nearest safe zone with a gate, boats back to their moorings and armour to where it landed. Esc clears the selection. Left drag no longer pans the map; use right or middle drag. All four order keys can be rebound in Settings.
@@ -71,6 +80,7 @@ Every key can be rebound in Settings. These are the defaults.
 | Right-click (troops selected) | Move them there. They walk as a group, through gates, and hold the spot |
 | M / H / K / Z | Selected troops: move (then click the point) / hunt / hold where they stand / back to your nearest safe zone (boats to their moorings, armour to where it landed) |
 | V / C / R | Building heights view / special buildings view / range rings |
+| L | Fade the decks (overpasses) to see under them; only on maps with roads on more than one level |
 | Ctrl+Z | Undo (planning, single player) |
 | Enter | Close a zone / next stage |
 | Esc | Cancel the current tool or troop selection, then the pause menu |
@@ -104,7 +114,7 @@ In the campaign the patrol boat and water mines are issued from the start; the f
 - **Daily Challenge.** A generated city and two mutators chosen from the date. Your best result for each day is kept.
 - **Sandbox.** Unlimited money and command points, with everything unlocked. Results are not recorded.
 - **Co-operative.** Two players link directly by swapping two codes; there is no server. The host picks the city and both players plan together. Money and command points are split evenly. Each player owns their own zones, walls and units, and READY needs both players. Both boards run the same clock, so the slower computer sets the pace. Some strict networks block direct links.
-- **Map Editor.** Start from a blank sheet (up to 12 km), a generated city (up to 10 km) or an imported map. You can draw roads (including bridges, paths and rail), buildings, water, parks, stage boundaries and outbreak hints. Inspect the sheet for problems, *Test play* it, save it to the library or export it.
+- **Map Editor.** Start from a blank sheet (up to 12 km), a generated city (up to 10 km) or an imported map. You can draw roads (including bridges, paths and rail), buildings, water, parks, stage boundaries and outbreak hints. A selected road has a *Level* (tunnel −2 or −1, ground, deck 1 to 3), buttons to put a ramp at either end (it slopes down to the ground, or to the height of the road it meets), and a *Node heights* field with one height per node; double-clicking a road to add a node gives it the height between its neighbours. The *Levels* view (L) colours tunnels and decks by level. Inspect the sheet for problems, *Test play* it, save it to the library or export it.
 - **Library.** Your saved maps, mutators and scenarios. Sort, search and star them, export or import `.rcmap.json` files, and copy or paste share codes.
 
 ### Mutators
@@ -158,6 +168,8 @@ Squares run from 0.5 to 10 km. Anything over 2 km is downloaded in 2 km parts, a
 
 Public parks and gardens become parks. Back gardens and other private yards (a garden that is private or marked as a residential garden) stay open ground.
 
+Bridges and tunnels keep their levels. Bridge ways are joined end to end; a bridge over a road, path or railway becomes a deck at its `layer` (1 to 3), one over water only stays a level-0 water bridge, and one over nothing stays a road. Tunnels go to level −1 or −2; covered ways and building passages stay on the ground; indoor ways, upper floors and underground parking aisles are left out. Link roads that meet a deck slope along their length, and a deck that meets a plain road ramps down over its last 24 to 40 m. Rail bridges are drawn up on viaducts and rail tunnels and the subway below ground, as scenery.
+
 The map editor's *New drafting sheet* has the same finder under *Real place*: search, drag the square, fetch or drop a file, then *Draft from this place* to redraw it.
 
 Map data for imported places is © OpenStreetMap contributors and available under the Open Database License (<https://www.openstreetmap.org/copyright>). The attribution is shown in game and stored in the map's author field. The import is tested against recorded responses, and `node test/osm_live.mjs` checks the real services now and then; a change on their side may still need a fix.
@@ -200,7 +212,7 @@ js/util/              rng, geometry, events, gzip share codes
 js/map/               map format, city generator, OpenStreetMap import, campaign cities, IndexedDB library
 js/sim/               deterministic, DOM-free simulation: grid, world, agents, navigation fields, zones,
                       fire, structures, stages, economy, mutants, units, combat, abilities, vehicles
-js/render/            palette, camera, static map renderer (tiled cache), railways and trains, live world layer, effects
+js/render/            palette, camera, static map renderer (tiled cache), decks and tunnels, railways and trains, live world layer, effects
 js/game/              in-game session: loop, input, tools, HUD, info card, result card, menus, sound
 js/ui/                menu screens, loadout, settings, library, import, mutator editor, map editor, co-op lobby, feedback
 js/meta/              settings, progress and unlocks, achievements
@@ -218,4 +230,4 @@ The simulation in `js/sim` uses only its seeded random number generator and a fi
 node test/all.mjs
 ```
 
-This runs the simulation, movement, combat, targeting, map, shell, editor, lockstep, integration and train suites in Node 20 or later. `node test/sim_bench.mjs --city`, `node test/combat_bench.mjs` and `node test/crowd_bench.mjs` measure simulation speed. `node --expose-gc test/bigmap_bench.mjs 4,8,10` measures big sheets (generation, stage times, ms per tick, memory). `node test/osm_live.mjs` is a live check against the real map services; it is not part of the suite, so run it only now and then.
+This runs the simulation, movement, combat, targeting, map, shell, editor, lockstep, integration, train and multi-level road (`test/decks.mjs`: grid, fields, a leak suite across levels, agents, blasts, fallen decks, determinism) suites in Node 20 or later. `node test/deck_bench.mjs` compares one 4 km city flat, with its motorway, and with every long main road raised (ms per tick and memory); `sim_bench --city --flat` and `combat_bench --flat` run the city without its motorway. `node test/sim_bench.mjs --city`, `node test/combat_bench.mjs` and `node test/crowd_bench.mjs` measure simulation speed. `node --expose-gc test/bigmap_bench.mjs 4,8,10` measures big sheets (generation, stage times, ms per tick, memory). `node test/osm_live.mjs` is a live check against the real map services; it is not part of the suite, so run it only now and then.

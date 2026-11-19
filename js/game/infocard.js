@@ -219,14 +219,16 @@ export class InfoCard {
     const w = this.s.world, br = w.bridges[sel.id];
     if (!br) return '';
     const road = sel.road >= 0 ? w.map.roads[sel.road] : null;
-    let o = this.head((road && road.name) || 'Bridge', `SPAN ${String(sel.id + 1).padStart(3, '0')}`, br.alive ? 'standing' : '<span class="red">destroyed</span>');
+    let o = this.head((road && road.name) || (br.deck ? 'Overpass' : 'Bridge'), `${br.deck ? 'DECK' : 'SPAN'} ${String(sel.id + 1).padStart(3, '0')}`, br.alive ? 'standing' : '<span class="red">destroyed</span>');
+    if (br.deck) o += kv('Overpass', `level ${br.tier || 1}`);
     o += kv('Span', `${Math.round(br.len)} m`);
     o += kv('Deck width', `${Math.round(br.width)} m`);
     const f = br.hpMax ? br.hp / br.hpMax : 0;
     o += kv('Structural integrity', `${Math.round(f * 100)}%`);
     o += bar(f, f < 0.35 ? 'over' : f < 0.7 ? 'warn' : 'go');
     o += kv('Rating', `${fmtInt(br.hp)} / ${fmtInt(br.hpMax)} HP`);
-    o += '<p class="small faint">Explosives do double damage to bridges. Falling buildings hit them too.</p>';
+    o += br.deck ? '<p class="small faint">Explosives do double damage to overpasses. Whoever is on a fallen deck falls with it; the ground under it turns to rubble.</p>'
+      : '<p class="small faint">Explosives do double damage to bridges. Falling buildings hit them too.</p>';
     return o;
   }
 

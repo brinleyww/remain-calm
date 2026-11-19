@@ -4,6 +4,7 @@ import { polyArea, polySignedArea, polyCentroid, polyBBox, pointInPoly, simplify
 import { hashStr } from '../util/rng.js';
 import { FORMAT, VERSION, normalizeMap, makeStages, mergeHoles, reversePoly, clipPolyRect, clipLineRect, mapStats } from './format.js';
 import { OVERPASS_MIRRORS, NET, makeSlots, fetchQuery, hostOf, cancelled } from './osmnet.js';
+import { levelTags, assignHeights, simplifyZ } from './osmlevels.js';
 import { cacheKey, cacheGet, cachePut } from './osmcache.js';
 import { readOsmFile } from './osmfile.js';
 
@@ -587,21 +588,23 @@ export function osmToMap(raw, opts = {}) {
   }
   function addWayPiece(w, t, c, whole) {
     if (t.highway && !SKIP_HIGHWAY.has(t.highway) && t.area !== 'yes' && !FOOTWAY_SKIP.has(t.footway)) {
-      if (t.tunnel && t.tunnel !== 'no' && t.tunnel !== 'building_passage') return;
-      if (num(t.layer) < 0 && !t.bridge) return;
+      const lt = levelTags(t);
+      if (lt.drop) return;
       const spec = ROAD_SPEC[t.highway];
       if (!spec) return;
       let [k, wid] = spec;
       if (t.highway === 'service' && (t.service === 'parking_aisle' || t.service === 'driveway')) wid = 3.5;
       const tw = num(t.width);
       if (tw > 1.5 && tw < 50) wid = tw;
-      roads.push({ p: flat(c), w: wid, k, name: t.name, bridge: !!(t.bridge && !BRIDGE_NO.has(t.bridge)) });
+      roads.push({ p: flat(c), keys: c.map(q => q[0]), w: wid, k, name: t.name, bridge: !!(t.bridge && !BRIDGE_NO.has(t.bridge)), zt: lt.z, raised: lt.raised, link: lt.link });
       return;
     }
     if (t.railway) {
-      if (t.tunnel && t.tunnel !== 'no') return;
-      if (t.railway === 'subway' && !(t.bridge && !BRIDGE_NO.has(t.bridge)) && t.tunnel !== 'no' && !(num(t.layer) > 0)) return;
-      if (/^(rail|light_rail|narrow_gauge|subway)$/.test(t.railway)) roads.push({ p: flat(c), w: num(t.gauge) > 0 && t.railway === 'narrow_gauge' ? 4 : 6, k: 'rail' });
+      // rail bridges and viaducts are drawn above ground, tunnels and the subway below: both are scenery
+      if (/^(rail|light_rail|narrow_gauge|subway)$/.test(t.railway)) {
+        const lt = levelTags(t, true);
+        roads.push({ p: flat(c), keys: c.map(q => q[0]), w: num(t.gauge) > 0 && t.railway === 'narrow_gauge' ? 4 : 6, k: 'rail', zt: lt.z });
+      }
       return;
     }
     if (t.natural === 'coastline') { coastChains.push(c); return; }
@@ -668,14 +671,15 @@ export function osmToMap(raw, opts = {}) {
   for (const x of water) rasterPoly(x.p, cell, gw, gh, i => { wmask[i] = 1; });
   const wetAt = (x, y) => { const cx = (x / cell) | 0, cy = (y / cell) | 0; return cx >= 0 && cy >= 0 && cx < gw && cy < gh && wmask[cy * gw + cx] === 1; };
 
-  // roads
+  // roads: heights of bridges, tunnels and ramps first (z per vertex), then clipped to the square
+  assignHeights(roads, wetAt);
   const outRoads = [];
   for (const r of roads) {
-    for (const piece of clipLineRect(r.p, 0, 0, W, H)) {
-      const q = simplify(piece, 0.5);
+    const pieces = r.z ? clipLineRect(r.p, 0, 0, W, H, r.z).map(c => simplifyZ(c.p, c.z, 0.5)) : clipLineRect(r.p, 0, 0, W, H).map(c => ({ p: simplify(c, 0.5), z: null }));
+    for (const { p: q, z: qz } of pieces) {
       if (q.length < 4) continue;
       let k = r.k;
-      if (r.bridge && k !== 'rail') {
+      if (r.wb && k !== 'rail') {
         let wetN = 0;
         for (let i = 0; i + 3 < q.length; i += 2) {
           const L = Math.hypot(q[i + 2] - q[i], q[i + 3] - q[i + 1]), m = Math.max(1, Math.ceil(L / 3));
@@ -685,6 +689,7 @@ export function osmToMap(raw, opts = {}) {
       }
       const o = { p: q, w: r.w, k };
       if (r.name) o.name = r.name;
+      if (qz && qz.some(v => v !== 0)) o.z = qz;
       outRoads.push(o);
     }
   }

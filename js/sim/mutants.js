@@ -10,11 +10,12 @@ export function resetMutants(world) {
   world._pitId = 1;
 }
 
-export function explodeAt(world, x, y, src = 'explosive') {
+// tier: where the explosive mutant stood (a deck or tunnel blast stays on its own tier, see damageArea)
+export function explodeAt(world, x, y, src = 'explosive', tier = 0) {
   const k = world.cfg.mutation.kinds.explosive;
   world.effects.push({ kind: 'boom', x, y, r: k.blastRadius, t0: world.t, dur: 0.7 });
   world.events.emit('sound', { name: 'explosion', x, y, vol: 0.8 });
-  damageArea(world, x, y, k.blastRadius, k.blastDmg, { src, friendly: true, wallDmg: k.wallDmg });
+  damageArea(world, x, y, k.blastRadius, k.blastDmg, { src, friendly: true, wallDmg: k.wallDmg, tier });
 }
 
 function densest(world) {
@@ -32,14 +33,14 @@ function densest(world) {
   const cx = (best % bw + 0.5) * sh.bz, cy = (((best / bw) | 0) + 0.5) * sh.bz;
   let sx = 0, sy = 0, n = 0;
   const A = world.A;
-  world.query(cx, cy, sh.bz * 1.5, M_ZOMBIE, (i) => { if (!A.sub[i]) { sx += A.x[i]; sy += A.y[i]; n++; } });
+  world.query(cx, cy, sh.bz * 1.5, M_ZOMBIE, (i) => { if (!A.sub[i]) { sx += A.x[i]; sy += A.y[i]; n++; } }, 0);
   return n ? { x: sx / n, y: sy / n, n } : null;
 }
 
 function resolvePit(world, pit) {
   const mc = world.cfg.mutation, A = world.A;
   const near = [];
-  world.query(pit.x, pit.y, pit.r, M_ZOMBIE, (i, d2) => { if (!A.sub[i]) near.push([d2, i]); });
+  world.query(pit.x, pit.y, pit.r, M_ZOMBIE, (i, d2) => { if (!A.sub[i]) near.push([d2, i]); }, 0);
   if (near.length < mc.pitMin) {
     world.events.emit('log', { msg: 'MOSH PIT DISPERSED', kind: 'info', x: pit.x, y: pit.y });
     return;

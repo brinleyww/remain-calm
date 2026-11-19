@@ -1,6 +1,6 @@
 // Editor document: the map being drafted, undo/redo of item-level operations, hit testing and snapping.
 // DOM-free so it runs in node tests.
-import { normalizeMap, clipPolyRect, clipLineRect, LIMITS } from '../map/format.js';
+import { normalizeMap, clipPolyRect, clipLineRect, LIMITS, Z_MIN, Z_MAX } from '../map/format.js';
 import { polyBBox, polyCentroid, pointInPoly, distToPolyline, clamp } from '../util/geom.js';
 
 export const COLLS = ['roads', 'water', 'parks', 'buildings', 'levels', 'spawns'];
@@ -8,7 +8,8 @@ export const DRAWN_COLLS = new Set(['roads', 'water', 'parks', 'buildings']);
 export const COLL_LABEL = { roads: 'Road', water: 'Water', parks: 'Park', buildings: 'Building', levels: 'Stage', spawns: 'Outbreak point' };
 
 const r1 = v => Math.round(v * 10) / 10;
-export const cloneItem = it => (Array.isArray(it) ? it.slice() : it && typeof it === 'object' ? { ...it, p: it.p ? it.p.slice() : it.p } : it);
+export const cloneItem = it => (Array.isArray(it) ? it.slice() : it && typeof it === 'object'
+  ? (it.z ? { ...it, p: it.p ? it.p.slice() : it.p, z: it.z.slice() } : { ...it, p: it.p ? it.p.slice() : it.p }) : it);
 const cloneList = l => l.map(cloneItem);
 
 export function cloneMap(m) {
@@ -63,6 +64,71 @@ export function rotated(coll, it, ang, cx, cy) {
     o.p[i] = r1(cx + x * c - y * s); o.p[i + 1] = r1(cy + x * s + y * c);
   }
   return o;
+}
+
+// ---------------------------------------------------------------- road heights
+// Every edit of a road's nodes keeps its heights (z, one per node) in step.
+const zr = (v) => clamp(Math.round(v * 10) / 10, Z_MIN, Z_MAX);
+const tidyZ = (o) => { if (o.z && !o.z.some((v) => v !== 0)) delete o.z; return o; };
+
+// A copy of road `it` with a node at (x, y) after the node at offset k; its height is interpolated.
+export function insertVertex(it, k, x, y) {
+  const o = cloneItem(it), p = o.p;
+  p.splice(k + 2, 0, r1(x), r1(y));
+  if (o.z) {
+    const i = k >> 1, ax = p[k], ay = p[k + 1], bx = p[k + 4], by = p[k + 5];
+    const L = Math.hypot(bx - ax, by - ay), t = L > 0 ? Math.hypot(x - ax, y - ay) / L : 0.5;
+    o.z.splice(i + 1, 0, zr(o.z[i] + ((o.z[i + 1] ?? o.z[i]) - o.z[i]) * clamp(t, 0, 1)));
+  }
+  return o;
+}
+
+// A copy of road `it` without the node at offset k (and its height).
+export function removeVertex(it, k) {
+  const o = cloneItem(it);
+  o.p.splice(k, 2);
+  if (o.z) o.z.splice(k >> 1, 1);
+  return tidyZ(o);
+}
+
+// Every node of the road at height z (0: on the ground).
+export function setRoadLevel(it, z) {
+  const o = cloneItem(it);
+  if (!z) delete o.z; else o.z = new Array(o.p.length >> 1).fill(zr(z));
+  return o;
+}
+
+// The road slopes from its height down (or up) to zEnd over its first (end 0) or last (end 1) len metres:
+// a node is inserted where the slope starts and the end node takes zEnd.
+export function addRamp(it, end, len, zEnd = 0) {
+  let o = cloneItem(it);
+  if (!o.z) o.z = new Array(o.p.length >> 1).fill(0);
+  if (end) { o = reversedRoad(o); }
+  const p = o.p, n = p.length >> 1;
+  let acc = 0, k = 1;
+  for (; k < n; k++) { const l = Math.hypot(p[2 * k] - p[2 * k - 2], p[2 * k + 1] - p[2 * k - 1]); if (acc + l >= len) break; acc += l; }
+  if (k < n) {
+    const l = Math.hypot(p[2 * k] - p[2 * k - 2], p[2 * k + 1] - p[2 * k - 1]), f = l > 0 ? (len - acc) / l : 0;
+    if (f > 0.02 && f < 0.98) o = insertVertex(o, 2 * (k - 1), p[2 * k - 2] + (p[2 * k] - p[2 * k - 2]) * f, p[2 * k - 1] + (p[2 * k + 1] - p[2 * k - 1]) * f);
+  }
+  const q = o.p, m = q.length >> 1, top = o.z[Math.min(m - 1, k)];
+  let s = 0;
+  o.z[0] = zr(zEnd);
+  for (let j = 1; j < m; j++) {
+    s += Math.hypot(q[2 * j] - q[2 * j - 2], q[2 * j + 1] - q[2 * j - 1]);
+    if (s >= len - 0.05) break;
+    o.z[j] = zr(zEnd + (top - zEnd) * s / len);
+  }
+  if (end) o = reversedRoad(o);
+  return tidyZ(o);
+}
+
+function reversedRoad(o) {
+  const p = o.p, n = p.length >> 1, q = new Array(p.length);
+  for (let i = 0; i < n; i++) { q[2 * i] = p[2 * (n - 1 - i)]; q[2 * i + 1] = p[2 * (n - 1 - i) + 1]; }
+  const r = { ...o, p: q };
+  if (o.z) r.z = o.z.slice().reverse();
+  return r;
 }
 
 const boxUnion = (a, b) => (!a ? b.slice() : [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])]);
@@ -481,7 +547,8 @@ export function resizedMap(map, w, h) {
   o.water = polys(o.water);
   o.parks = polys(o.parks);
   o.buildings = polys(o.buildings);
-  o.roads = o.roads.flatMap(r => clipLineRect(r.p, 0, 0, w, h).map(p => ({ ...r, p })));
+  o.roads = o.roads.flatMap(r => (r.z ? clipLineRect(r.p, 0, 0, w, h, r.z).map(c => tidyZ({ ...r, p: c.p, z: c.z.map(zr) }))
+    : clipLineRect(r.p, 0, 0, w, h).map(p => ({ ...r, p }))));
   o.levels = o.levels.map((l, i) => {
     const wasFull = isFullSheet(l.p, map.w, map.h) || i === map.levels.length - 1;
     const p = wasFull ? [0, 0, w, 0, w, h, 0, h] : clipPolyRect(l.p, 0, 0, w, h);

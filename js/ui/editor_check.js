@@ -1,7 +1,7 @@
 // Map checks for the editor: format validation plus playability rules (nested stages, civilians per stage,
 // bridges over water). Every issue can point at a place on the sheet and at the item that caused it.
 import { validateMap, normalizeMap, LIMITS, popLimit } from '../map/format.js';
-import { polyArea, polyCentroid, pointInPoly, polyBBox } from '../util/geom.js';
+import { polyArea, polyCentroid, pointInPoly, polyBBox, distToPolyline } from '../util/geom.js';
 import { DEFAULTS } from '../data/config.js';
 import { itemCentre } from './editor_model.js';
 
@@ -123,7 +123,8 @@ export function checkMap(map, cfg = DEFAULTS) {
 
   const inWater = waterLookup(map);
   map.roads.forEach((r, i) => {
-    const pts = samplePolyline(r.p, 4);
+    // decks and tunnels never touch the water
+    const pts = samplePolyline(r.z ? groundPart(r) : r.p, 4);
     let wet = 0;
     for (let k = 0; k < pts.length; k += 2) if (inWater(pts[k], pts[k + 1])) wet++;
     const at = safeCentre('roads', r);
@@ -138,6 +139,7 @@ export function checkMap(map, cfg = DEFAULTS) {
       if (inWater(c[0], c[1])) W(`Building ${i + 1} stands in water`, c, { coll: 'buildings', idx: i });
     });
   }
+  levelChecks(map, W);
   if (!map.roads.length && map.buildings.length) W('There are no roads: civilians and zombies will cross open ground', null, null);
   if (!map.buildings.length) E('The map has no buildings', null, null);
   if (map.buildings.length > 90000 || map.roads.length > 50000) W(`Large map (${map.buildings.length.toLocaleString()} buildings): it needs a desktop with plenty of memory`, null, null);
@@ -147,6 +149,41 @@ export function checkMap(map, cfg = DEFAULTS) {
   const norm = validateMap(normalizeMap(map));
   for (const msg of norm.errors) E('After cleanup: ' + msg, null, null);
   return { ok: errors.length === 0, errors, warnings, stages };
+}
+
+// The nodes of a road with heights that are on the ground (|z| < 0.5), as one polyline of those stretches.
+function groundPart(r) {
+  const out = [];
+  for (let k = 0; k < r.p.length; k += 2) if (Math.abs(r.z[k >> 1]) < 0.5) out.push(r.p[k], r.p[k + 1]);
+  return out.length >= 4 ? out : [];
+}
+
+// Multi-level roads: a deck that ends in mid-air, a ramp steeper than one level per 30 m, and a ramp that comes up
+// to the ground inside a building.
+function levelChecks(map, W) {
+  const R = map.roads, near = (x, y, self) => R.some((o, j) => j !== self && distToPolyline(o.p, x, y) < ((o.w || 6) + (R[self].w || 6)) / 2 + 1);
+  const edge = (x, y) => x < 2 || y < 2 || x > map.w - 2 || y > map.h - 2;
+  R.forEach((r, i) => {
+    if (!r.z) return;
+    const p = r.p, n = p.length >> 1;
+    for (const k of [0, n - 1]) {
+      const x = p[2 * k], y = p[2 * k + 1];
+      if (Math.abs(r.z[k]) >= 0.5 && !edge(x, y) && !near(x, y, i)) W(`Road ${i + 1} ends ${r.z[k] > 0 ? 'in mid-air' : 'underground'}: give it a ramp or join it to another road`, [x, y], { coll: 'roads', idx: i });
+    }
+    for (let k = 0; k + 1 < n; k++) {
+      const L = Math.hypot(p[2 * k + 2] - p[2 * k], p[2 * k + 3] - p[2 * k + 1]);
+      if (L > 0 && Math.abs(r.z[k + 1] - r.z[k]) / L > 1 / 30 + 1e-9) { W(`Road ${i + 1} has a ramp steeper than one level per 30 m: people may not get up it`, [(p[2 * k] + p[2 * k + 2]) / 2, (p[2 * k + 1] + p[2 * k + 3]) / 2], { coll: 'roads', idx: i }); break; }
+    }
+    for (let k = 0; k + 1 < n; k++) {
+      const za = r.z[k], zb = r.z[k + 1];
+      for (const t of [-0.5, 0.5]) {
+        const f = za !== zb ? (t - za) / (zb - za) : -1;
+        if (f < 0 || f > 1) continue;
+        const x = p[2 * k] + (p[2 * k + 2] - p[2 * k]) * f, y = p[2 * k + 1] + (p[2 * k + 3] - p[2 * k + 1]) * f;
+        if (map.buildings.some(b => pointInPoly(b.p, x, y))) W(`Road ${i + 1} meets the ground inside a building: move the ramp out of it`, [x, y], { coll: 'roads', idx: i });
+      }
+    }
+  });
 }
 
 function safeCentre(coll, it) {

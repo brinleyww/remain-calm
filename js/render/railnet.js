@@ -36,23 +36,71 @@ function toEdge(out, W, H) {
   }
 }
 
-function makeLine(r, road, W, H) {
-  const src = road.p, out = [];
+// A rail with heights (road.z) gives one line per level stretch: lev 1 (on a viaduct, drawn on the deck layer),
+// 0 (on the ground) or -1 (in a tunnel). The pieces share their end points, so trains run straight through.
+function makeLines(r, road, W, H) {
+  const src = road.p, zsrc = Array.isArray(road.z) && road.z.length * 2 === src.length ? road.z : null, out = [], oz = [];
   let px = NaN, py = NaN;
   for (let k = 0; k + 1 < src.length; k += 2) {
     const x = +src[k], y = +src[k + 1];
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     if (out.length && Math.hypot(x - px, y - py) < 0.05) continue;
     out.push(x, y); px = x; py = y;
+    if (zsrc) oz.push(+zsrc[k >> 1] || 0);
   }
+  if (out.length < 4) return [];
+  if (W > 0 && H > 0) {
+    const fx = out[0], fy = out[1];
+    toEdge(out, W, H);
+    if (zsrc) {
+      if (out[0] !== fx || out[1] !== fy) oz.unshift(oz[0]);
+      while (oz.length < out.length >> 1) oz.push(oz[oz.length - 1]);
+    }
+  }
+  if (!zsrc || !oz.some((v) => Math.abs(v) >= 0.5)) { const ln = makeLine(r, road, out); return ln ? [ln] : []; }
+  const lev = (v) => (v >= 0.5 ? 1 : v <= -0.5 ? -1 : 0), pieces = [];
+  let cur = null;
+  for (let i = 0; i + 3 < out.length; i += 2) {
+    const za = oz[i >> 1], zb = oz[(i >> 1) + 1], cuts = [0];
+    if (za !== zb) for (const t of [-0.5, 0.5]) { const f = (t - za) / (zb - za); if (f > 1e-6 && f < 1 - 1e-6) cuts.push(f); }
+    cuts.sort((a, b) => a - b);
+    cuts.push(1);
+    for (let j = 0; j + 1 < cuts.length; j++) {
+      const f0 = cuts[j], f1 = cuts[j + 1], l = lev(za + (zb - za) * (f0 + f1) / 2);
+      if (!cur || cur.lev !== l) {
+        if (cur) pieces.push(cur);
+        cur = { p: [out[i] + (out[i + 2] - out[i]) * f0, out[i + 1] + (out[i + 3] - out[i + 1]) * f0], z: [za + (zb - za) * f0], lev: l };
+      }
+      cur.p.push(out[i] + (out[i + 2] - out[i]) * f1, out[i + 1] + (out[i + 3] - out[i + 1]) * f1); cur.z.push(za + (zb - za) * f1);
+    }
+  }
+  if (cur) pieces.push(cur);
+  const lines = [];
+  for (const pc of pieces) {
+    const ln = makeLine(r, road, pc.p);
+    if (!ln) continue;
+    ln.lev = pc.lev;
+    ln.z = Float64Array.from(pc.z.length === ln.p.length >> 1 ? pc.z : new Array(ln.p.length >> 1).fill(pc.lev));
+    lines.push(ln);
+  }
+  return lines;
+}
+
+function makeLine(r, road, out) {
   if (out.length < 4) return null;
-  if (W > 0 && H > 0) toEdge(out, W, H);
   const p = Float64Array.from(out), n = p.length >> 1, cum = new Float64Array(n);
   for (let k = 1; k < n; k++) cum[k] = cum[k - 1] + Math.hypot(p[2 * k] - p[2 * k - 2], p[2 * k + 1] - p[2 * k - 1]);
   const L = cum[n - 1];
   if (L < 1) return null;
   const w = road.w > 0 ? road.w : 6;
-  return { r, w, p, cum, L, bb: polyBBox(out), bed: bedOf(w), gauge: gaugeOf(w), spans: [], buf0: false, buf1: false, edges: [], twins: [] };
+  return { r, w, p, cum, L, bb: polyBBox(out), bed: bedOf(w), gauge: gaugeOf(w), spans: [], buf0: false, buf1: false, edges: [], twins: [], lev: 0, z: null };
+}
+
+// Height (tiers) of a line, or of a route, at distance s along it.
+export function zAlong(p, cum, z, s) {
+  if (!z) return 0;
+  const i = segAt(cum, s), L = cum[i + 1] - cum[i] || 1e-9, t = clamp((s - cum[i]) / L, 0, 1);
+  return z[i] + (z[i + 1] - z[i]) * t;
 }
 
 // Index of the segment holding distance s (clamped to the first / last segment).
@@ -93,11 +141,13 @@ export function nearestOnLine(line, x, y, out = [0, 0, 0, 0]) {
   return out;
 }
 
-function subPoints(line, d0, d1, dst) {
+function subPoints(line, d0, d1, dst, dz = null) {
   const p = line.p, cum = line.cum, n = cum.length, T = [0, 0, 0, 0];
   sampleAt(p, cum, d0, T); dst.push(T[0], T[1]);
-  for (let k = 1; k < n - 1; k++) if (cum[k] > d0 + 1e-6 && cum[k] < d1 - 1e-6) dst.push(p[2 * k], p[2 * k + 1]);
+  if (dz) dz.push(zAlong(p, cum, line.z, d0));
+  for (let k = 1; k < n - 1; k++) if (cum[k] > d0 + 1e-6 && cum[k] < d1 - 1e-6) { dst.push(p[2 * k], p[2 * k + 1]); if (dz) dz.push(line.z ? line.z[k] : 0); }
   sampleAt(p, cum, d1, T); dst.push(T[0], T[1]);
+  if (dz) dz.push(zAlong(p, cum, line.z, d1));
   return dst;
 }
 
@@ -252,19 +302,22 @@ function findCrossings(map, lines) {
   for (let ri = 0; ri < R.length; ri++) {
     const rd = R[ri];
     if (rd.k !== 'major' && rd.k !== 'minor') continue;
-    const q = rd.p;
+    const q = rd.p, rz = Array.isArray(rd.z) && rd.z.length * 2 === (q ? q.length : 0) ? rd.z : null;
     if (!q || q.length < 4) continue;
     const w = rd.w > 0 ? rd.w : rd.k === 'major' ? 12 : 7;
     for (let j = 0; j + 3 < q.length; j += 2) {
       const cx = q[j], cy = q[j + 1], dx = q[j + 2], dy = q[j + 3];
       rg.each(Math.min(cx, dx), Math.min(cy, dy), Math.max(cx, dx), Math.max(cy, dy), v => {
         const li = Math.floor(v / 65536), k = v % 65536, ln = lines[li], p = ln.p;
+        if (ln.lev) return;
         const ax = p[2 * k], ay = p[2 * k + 1], bx = p[2 * k + 2], by = p[2 * k + 3];
         const rx = bx - ax, ry = by - ay, sx = dx - cx, sy = dy - cy;
         const den = rx * sy - ry * sx;
         if (Math.abs(den) < 1e-9) return;
         const t = ((cx - ax) * sy - (cy - ay) * sx) / den, u = ((cx - ax) * ry - (cy - ay) * rx) / den;
         if (t < 0 || t > 1 || u < 0 || u > 1) return;
+        // a road on a deck or in a tunnel there passes over or under the railway, not across it
+        if (rz && Math.abs(rz[j >> 1] + (rz[(j >> 1) + 1] - rz[j >> 1]) * u) >= 0.5) return;
         const rl = Math.hypot(rx, ry) || 1, sl = Math.hypot(sx, sy) || 1;
         const sin = Math.abs(den) / (rl * sl);
         if (sin < 0.26) return;
@@ -341,7 +394,7 @@ function findPlatforms(map, lines, crossings) {
     const cand = [];
     let best = Infinity;
     lines.forEach((ln, li) => {
-      if (ln.bb[0] > cx + 90 || ln.bb[2] < cx - 90 || ln.bb[1] > cy + 90 || ln.bb[3] < cy - 90) return;
+      if (ln.lev || ln.bb[0] > cx + 90 || ln.bb[2] < cx - 90 || ln.bb[1] > cy + 90 || ln.bb[3] < cy - 90) return;
       nearestOnLine(ln, cx, cy, near);
       if (near[1] > 80 || near[0] < 10 || near[0] > ln.L - 10) return;
       cand.push({ li, d: near[0], dist: near[1] });
@@ -454,15 +507,17 @@ function findRoutes(net) {
 
 function routeGeometry(net, lines, r, stopList) {
   const { edges, nodes } = net;
-  const pts = [], at = [];
-  let s = 0;
+  const pts = [], at = [], zs = [];
+  let s = 0, anyZ = false;
   for (const de of r.dirs) {
-    const E = edges[de >> 1], rev = de & 1, sub = subPoints(lines[E.line], E.d0, E.d1, []);
-    if (rev) for (let i = 0, j = sub.length - 2; i < j; i += 2, j -= 2) { let t = sub[i]; sub[i] = sub[j]; sub[j] = t; t = sub[i + 1]; sub[i + 1] = sub[j + 1]; sub[j + 1] = t; }
+    const E = edges[de >> 1], rev = de & 1, sz = [], sub = subPoints(lines[E.line], E.d0, E.d1, [], sz);
+    if (lines[E.line].z) anyZ = true;
+    if (rev) { for (let i = 0, j = sub.length - 2; i < j; i += 2, j -= 2) { let t = sub[i]; sub[i] = sub[j]; sub[j] = t; t = sub[i + 1]; sub[i + 1] = sub[j + 1]; sub[j + 1] = t; } sz.reverse(); }
     at.push({ e: de >> 1, rev, s, L: E.L });
     let k0 = 0;
     if (pts.length && Math.hypot(sub[0] - pts[pts.length - 2], sub[1] - pts[pts.length - 1]) < 0.5) k0 = 2;
     for (let k = k0; k < sub.length; k++) pts.push(sub[k]);
+    for (let k = k0 >> 1; k < sz.length; k++) zs.push(sz[k]);
     s += E.L;
   }
   const p = Float64Array.from(pts), n = p.length >> 1, cum = new Float64Array(n);
@@ -480,7 +535,7 @@ function routeGeometry(net, lines, r, stopList) {
   const stops = [];
   for (const v of st) if (!stops.length || v - stops[stops.length - 1] > 60) stops.push(v);
   const segs = at.map(a => ({ e: a.e, s0: a.s * scale, s1: (a.s + a.L) * scale }));
-  return { p, cum, L, portalA: nodes[r.a].portal, portalB: nodes[r.b].portal, stops: Float64Array.from(stops), segs, share: r.share };
+  return { p, cum, L, z: anyZ && zs.length === n ? Float64Array.from(zs) : null, portalA: nodes[r.a].portal, portalB: nodes[r.b].portal, stops: Float64Array.from(stops), segs, share: r.share };
 }
 
 function reverseRoute(rt) {
@@ -489,7 +544,8 @@ function reverseRoute(rt) {
   for (let k = 1; k < n; k++) cum[k] = cum[k - 1] + Math.hypot(q[2 * k] - q[2 * k - 2], q[2 * k + 1] - q[2 * k - 1]);
   const stops = Float64Array.from(Array.from(rt.stops, v => rt.L - v).reverse());
   const segs = rt.segs.map(g => ({ e: g.e, s0: rt.L - g.s1, s1: rt.L - g.s0 })).reverse();
-  return { ...rt, p: q, cum, portalA: rt.portalB, portalB: rt.portalA, stops, segs };
+  const z = rt.z ? Float64Array.from(rt.z).reverse() : null;
+  return { ...rt, p: q, cum, z, portalA: rt.portalB, portalB: rt.portalA, stops, segs };
 }
 
 // ---------------------------------------------------------------- entry point
@@ -497,18 +553,19 @@ function reverseRoute(rt) {
 // { lines, byRoad, nodes, edges, crossings, platforms, stops, routes, W, H, length }
 export function analyseRails(map) {
   const W = map.w || 0, H = map.h || 0, R = map.roads || [];
-  const byRoad = new Int32Array(R.length).fill(-1), lines = [];
+  const byRoad = new Int32Array(R.length).fill(-1), more = new Map(), lines = [];
   for (let r = 0; r < R.length; r++) {
     if (!R[r] || R[r].k !== 'rail' || !R[r].p) continue;
-    const ln = makeLine(r, R[r], W, H);
-    if (!ln) continue;
+    const ls = makeLines(r, R[r], W, H);
+    if (!ls.length) continue;
     byRoad[r] = lines.length;
-    lines.push(ln);
+    if (ls.length > 1) more.set(r, ls.map((_, k) => lines.length + k));
+    lines.push(...ls);
   }
-  const net = { lines, byRoad, nodes: [], edges: [], crossings: [], platforms: [], stops: [], routes: [], W, H, length: 0 };
+  const net = { lines, byRoad, more, nodes: [], edges: [], crossings: [], platforms: [], stops: [], routes: [], W, H, length: 0 };
   if (!lines.length) return net;
   const water = (map.water || []).filter(w => w.p && w.p.length >= 6).map(w => ({ p: w.p, bb: polyBBox(w.p) }));
-  for (const ln of lines) { ln.spans = bridgeSpans(ln, water); net.length += ln.L; }
+  for (const ln of lines) { ln.spans = ln.lev ? [] : bridgeSpans(ln, water); net.length += ln.L; }
   Object.assign(net, buildGraph(lines, W, H));
   findTwins(lines);
   net.crossings = findCrossings(map, lines);
@@ -531,6 +588,7 @@ export function railSignature(map) {
     n++;
     mixIn(rd.w || 0); mixIn(rd.p.length);
     for (let k = 0; k < rd.p.length; k++) mixIn(rd.p[k]);
+    if (Array.isArray(rd.z)) for (let k = 0; k < rd.z.length; k++) mixIn(rd.z[k] + 7);
   }
   for (let i = 0; i < B.length; i++) if (isStation(B[i]) && B[i].p) { mixIn(i); mixIn(B[i].p[0]); mixIn(B[i].p[1]); }
   return `${n}|${R.length}|${B.length}|${(map.water || []).length}|${map.w}x${map.h}|${h}`;

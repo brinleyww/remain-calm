@@ -4,6 +4,7 @@ import { getPalette, rgba, mix, hexToRgb, FONT_MONO } from './palette.js';
 import { drawProjectiles, drawEffects, drawAircraft, stampLabel, tag } from './fx.js';
 import { drawNavalGlyph, drawBoat, BOAT_TYPES } from './navalrender.js';
 import { TrainLayer } from './trains.js';
+import { drawDecks } from './deckrender.js';
 import { hash2 } from '../util/rng.js';
 import { pointInPoly, polyBBox } from '../util/geom.js';
 
@@ -20,6 +21,9 @@ const VEC_MAX = 4000, VEC_MAX_ZOOM = 2.5; // above this many visible agents, and
 const PIX_MAX_D = 12; // ...or, that crowded, whenever a zombie disc is at most this many device px across
 const SAMPLE_M = 2; // wall damage is read from the grid every 2 m along the drawn line
 const W_NONE = 0, W_OK = 1, W_WORN = 2, W_CRIT = 3, W_BROKEN = 4, W_GATE = 5;
+// Which agents a pass draws on maps with decks: everyone (flat maps), the ground, the decks, the tunnels.
+const P_ALL = -1, P_GROUND = 0, P_DECK = 1, P_TUNNEL = 2;
+const AIR = new Set(['heli', 'gunship', 'plane']);
 
 export function wallLineWidth(cam, cell = 4) { return Math.max(1.5, cell * cam.zoom * 1.05); }
 
@@ -666,16 +670,34 @@ export class WorldRenderer {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this._fire(ctx, world, cam);
     if (!this.trains || this.trains.map !== world.map) this.trains = new TrainLayer(world.map);
-    this.trains.draw(ctx, world, cam, st, pal);
+    const decks = !!(world.grid && world.grid.deck);
+    this.trains.draw(ctx, world, cam, st, pal, decks ? 0 : -1);
     this._zones(ctx, world, cam, pats, st);
     this._corridors(ctx, world, cam, pats);
     this._holds(ctx, world, cam);
     this._walls(ctx, world, cam, pats);
     this._pickups(ctx, world, cam, st);
     this._pits(ctx, world, cam, st);
-    this._agents(ctx, world, cam, st);
-    this._units(ctx, world, cam, st);
-    this._vehicles(ctx, world, cam, st);
+    if (!decks) {
+      this._agents(ctx, world, cam, st, P_ALL);
+      this._units(ctx, world, cam, st);
+      this._vehicles(ctx, world, cam, st);
+    } else {
+      // under the decks: people in tunnels (faint), on the ground, ground vehicles; then the decks, the walls again
+      // where they cross them, and everyone up on a deck
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      this._agents(ctx, world, cam, st, P_TUNNEL);
+      ctx.restore();
+      this._agents(ctx, world, cam, st, P_GROUND);
+      this._units(ctx, world, cam, st);
+      this._vehicles(ctx, world, cam, st, false);
+      const shown = drawDecks(ctx, world.map, world.grid, cam, { palette: pal.name, world, stage: world.region && world.region.poly, fade: !!st.fadeDecks });
+      if (shown && (world.walls.length || world.zones.comps.length)) this._walls(ctx, world, cam, pats);
+      this._agents(ctx, world, cam, st, P_DECK);
+      this.trains.draw(ctx, world, cam, st, pal, 1);
+      this._vehicles(ctx, world, cam, st, true);
+    }
     drawProjectiles(ctx, world, cam, st.t, pal);
     const flash = drawEffects(ctx, world, cam, st.t, pal, st.rt, st.abilityName);
     if (st.rings) this._allRings(ctx, world, cam);
@@ -1079,9 +1101,9 @@ export class WorldRenderer {
   // People and zombies are filled discs sized from a world radius (with a floor when zoomed out), drawn one fill per
   // disc grouped by colour (the browser has a fast path for single circles; one path of thousands of arcs is slow).
   // Very dense views go to the pixel buffer instead. Mutants are few, so each is drawn on its own.
-  _agents(ctx, world, cam, st) {
-    if (cam.zoom < PIXEL_ZOOM && world.A.n > 3000) { this._agentPixels(ctx, world, cam, st); return; }
-    const A = world.A, n = A.n;
+  _agents(ctx, world, cam, st, pass = P_ALL) {
+    if (cam.zoom < PIXEL_ZOOM && world.A.n > 3000) { this._agentPixels(ctx, world, cam, st, pass); return; }
+    const A = world.A, n = A.n, TR = pass === P_ALL ? null : A.tier;
     const pal = this.pal, z = cam.zoom, ox = cam.x, oy = cam.y, W = cam.w, H = cam.h;
     const type = A.type, sub = A.sub, X = A.x, Y = A.y, VX = A.vx, VY = A.vy, state = A.state;
     const ext = st.ext || 0;
@@ -1095,6 +1117,7 @@ export class WorldRenderer {
     for (let i = 0; i < n; i++) {
       const t = type[i];
       if (!t) continue;
+      if (TR !== null && (TR[i] === 0 ? pass !== P_GROUND : TR[i] > 0 ? pass !== P_DECK : pass !== P_TUNNEL)) continue;
       total++;
       if (t === ZOMBIE && sub[i]) { muts.push(i); continue; }
       const sx = (X[i] + VX[i] * ext - ox) * z, sy = (Y[i] + VY[i] * ext - oy) * z;
@@ -1102,12 +1125,12 @@ export class WorldRenderer {
       const b = t === CIV ? (state[i] === 1 ? B_PANIC : B_CALM) : t === ZOMBIE ? B_ZOM : t === TURNING ? B_TURN : t === POLICE ? B_POL : t === MILITIA ? B_MIL : B_SOL;
       vx[nv] = sx; vy[nv] = sy; vb[nv] = b; cnt[b + 1]++; nv++;
     }
-    if (nv > VEC_MAX && (z < VEC_MAX_ZOOM || 2 * rz * (st.dpr || 1) <= PIX_MAX_D)) { this._agentPixels(ctx, world, cam, st); return; }
+    if (nv > VEC_MAX && (z < VEC_MAX_ZOOM || 2 * rz * (st.dpr || 1) <= PIX_MAX_D)) { this._agentPixels(ctx, world, cam, st, pass); return; }
     for (let b = 1; b <= NB; b++) cnt[b] += cnt[b - 1];
     const sx = this._ox, sy = this._oy, at = cnt.slice();
     for (let k = 0; k < nv; k++) { const p = at[vb[k]]++; sx[p] = vx[k]; sy[p] = vy[k]; }
     const rad = [rc, rc, rc, rz, ra, ra, ra];
-    if (rz >= EDGE_R) {
+    if (rz >= EDGE_R && pass !== P_TUNNEL) {
       const ew = clamp(rz * 0.18, 0.6, 1.1);
       ctx.fillStyle = pal.agent.edge;
       for (let b = 0; b < NB; b++) { const r = rad[b] + ew; for (let k = cnt[b]; k < cnt[b + 1]; k++) { ctx.beginPath(); ctx.arc(sx[k], sy[k], r, 0, TAU); ctx.fill(); } }
@@ -1146,8 +1169,8 @@ export class WorldRenderer {
 
   // Zoomed out, every agent is a small disc stamped into a pixel buffer that is uploaded once,
   // because a vector path with tens of thousands of contours is slow to rasterise on the GPU.
-  _agentPixels(ctx, world, cam, st) {
-    const A = world.A, n = A.n, dpr = st.dpr || 1;
+  _agentPixels(ctx, world, cam, st, pass = P_ALL) {
+    const A = world.A, n = A.n, dpr = st.dpr || 1, TR = pass === P_ALL ? null : A.tier;
     const type = A.type, sub = A.sub, X = A.x, Y = A.y, VX = A.vx, VY = A.vy, state = A.state;
     const z = cam.zoom, ox = cam.x, oy = cam.y, k = z * dpr, ext = st.ext || 0;
     const PW = Math.max(1, Math.round(cam.w * dpr)), PH = Math.max(1, Math.round(cam.h * dpr));
@@ -1165,17 +1188,19 @@ export class WorldRenderer {
     const dC = Math.max(3, Math.round(2 * Math.max(F_CIV, R_CIV * z) * dpr)), dZ = Math.max(3, Math.round(2 * rz * dpr)), dA = Math.max(3, Math.round(2 * Math.max(F_ARM, R_ARM * z) * dpr));
     const spC = discSpans(dC), spZ = discSpans(dZ), spA = discSpans(dA);
     // close up (crowded views only reach here then), every disc first gets an ink edge, as on the vector path
-    const edge = rz >= EDGE_R, ed = edge ? Math.max(2, 2 * Math.round(clamp(rz * 0.18, 0.6, 1.1) * dpr)) : 0;
+    const edge = rz >= EDGE_R && pass !== P_TUNNEL, ed = edge ? Math.max(2, 2 * Math.round(clamp(rz * 0.18, 0.6, 1.1) * dpr)) : 0;
     const eC = edge ? discSpans(dC + ed) : null, eZ = edge ? discSpans(dZ + ed) : null, eA = edge ? discSpans(dA + ed) : null;
     const ecol = edge ? this._edgePixel() : 0;
     const muts = this._muts || (this._muts = []);
     muts.length = 0;
     let bx0 = PW, by0 = PH, bx1 = 0, by1 = 0, drawn = 0, total = 0;
+    const tp = pass;
     for (let pass = edge ? -1 : 0; pass < 2; pass++) {
       const rim = pass < 0;
       for (let i = 0; i < n; i++) {
         const t = type[i];
         if (!t) continue;
+        if (TR !== null && (TR[i] === 0 ? tp !== P_GROUND : TR[i] > 0 ? tp !== P_DECK : tp !== P_TUNNEL)) continue;
         if (!rim && (t === CIV || t === TURNING) === (pass === 1)) continue;
         if (t === ZOMBIE && sub[i]) { if (!rim) { total++; muts.push(i); } continue; }
         if (!rim) total++;
@@ -1314,12 +1339,14 @@ export class WorldRenderer {
     if (nStroke) { ctx.strokeStyle = pal.amber; ctx.lineWidth = 1.5; ctx.stroke(stroked); }
   }
 
-  _vehicles(ctx, world, cam, st) {
+  // air: undefined draws every vehicle; true / false only aircraft / only the ones on the ground or water
+  _vehicles(ctx, world, cam, st, air) {
     const list = world.vehicles;
     if (!list || !list.length) return;
     const pal = this.pal, z = cam.zoom;
     for (const v of list) {
       if (!v || v.alive === false) continue;
+      if (air !== undefined && AIR.has(v.kind) !== air) continue;
       const sx = (v.x - cam.x) * z, sy = (v.y - cam.y) * z;
       if (sx < -60 || sy < -60 || sx > cam.w + 60 || sy > cam.h + 60) continue;
       const col = world.owners > 1 && v.owner > 0 ? pal.carbon : pal.ink;

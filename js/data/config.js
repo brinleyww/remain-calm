@@ -70,6 +70,9 @@ export const DEFAULTS = {
   building: { hpBase: 200, hpPerM2: 1.5, hpPerM: 8, collapseFireChance: 0.5, toppleRange: 1.0, dominoChance: 0.4 },
   hazard: { radius: 40, dmg: 150, bldgDmg: 900, bridgeDmg: 600, wallDmg: 600, fire: 1 }, // hazard buildings explode when destroyed
   bridge: { hpPerM: 2, hpPerWidthM: 15, hpMin: 100, hpMax: 2500, explosiveMul: 2 },
+  // Multi-level roads: deck pieces (at most 300 m) get bridge hit points x hpMul; a blast smaller than bigBlastR
+  // hits only the tier it goes off on, a bigger one the ground and every deck (tunnels only from inside, or a nuke).
+  decks: { hpMul: 1.5, bigBlastR: 24 },
   friendlyFire: { auto: false, autoStructureMul: 0.25 }, // automatic weapons never hurt humans; aimed abilities do
 
   // ---------------- player items bought with money ----------------
