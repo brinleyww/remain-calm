@@ -118,6 +118,15 @@ export function showLoadoutPicker(s, done) {
   const aList = h('div.rc-lo-abilities');
   const spLine = h('div.meter-row');
   const render = () => {
+    const scrolled = [];
+    for (let n = aList.parentElement; n; n = n.parentElement) if (n.scrollTop) scrolled.push([n, n.scrollTop]);
+    const focusAt = document.activeElement && aList.contains(document.activeElement) ? [...aList.querySelectorAll('button')].indexOf(document.activeElement) : -1;
+    draw();
+    for (const [n, t] of scrolled) n.scrollTop = t;
+    const f = focusAt >= 0 ? aList.querySelectorAll('button')[focusAt] : null;
+    if (f && !f.disabled) f.focus({ preventScroll: true });
+  };
+  const draw = () => {
     uList.textContent = '';
     for (const id of allowed) {
       const c = cfg.units[id];

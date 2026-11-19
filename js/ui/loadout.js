@@ -127,7 +127,10 @@ export function openLoadout(container, opts = {}) {
     const a = document.activeElement;
     const keep = a && layer.contains(a) ? (a.dataset.id ? `.lo-card[data-id="${a.dataset.id}"]` : a.dataset.i ? `.lo-slot[data-i="${a.dataset.i}"]` : null) : null;
     const abKeep = a && a.classList && a.classList.contains('btn-icon') ? [...abList.querySelectorAll('.btn-icon')].indexOf(a) : -1;
+    // emptying a list collapses it for a moment, which resets every scroll position to the top
+    const scrolled = [layer, ...layer.querySelectorAll('*')].filter((n) => n.scrollTop || n.scrollLeft).map((n) => [n, n.scrollTop, n.scrollLeft]);
     renderSlots(); renderCatalogue(); renderAbilities();
+    for (const [n, t, l] of scrolled) { n.scrollTop = t; n.scrollLeft = l; }
     const f = keep ? layer.querySelector(keep) : abKeep >= 0 ? abList.querySelectorAll('.btn-icon')[abKeep] : null;
     if (f && !f.disabled) f.focus({ preventScroll: true });
   }
