@@ -1,8 +1,9 @@
 // Troop orders: selectables per owner, group moves through gates, walls, hold / hunt / back to zone, co-op owner
-// checks, vehicles, hashing, restore and determinism. Run: node test/orders.mjs
+// checks, vehicles, hashing, restore and determinism, levels (flat no-op, deck restore and lockstep). Run: node test/orders.mjs
 import { World, TYPE } from '../js/sim/world.js';
 import { installCombat } from '../js/sim/units.js';
-import { selectables } from '../js/sim/orders.js';
+import { selectables, marchPath } from '../js/sim/orders.js';
+import { normalizeMap } from '../js/map/format.js';
 import { LockstepDriver, makeLoopbackPair } from '../js/net/coop.js';
 import { makeTestMap, blockRect, assert } from './sim_testmap.mjs';
 
@@ -246,6 +247,80 @@ const script = (w, until, onTick) => {
   assert(common.length >= 5 && common.every((t) => da.hashLog.get(t).h === db.hashLog.get(t).h) && !desync, `lockstep with orders: hashes equal at ${common.length} checkpoints`);
   const orders = res.filter((r) => r[1] === 'order');
   assert(orders.length === 3 && orders.filter((r) => r[3]).length === 2 && orders.some((r) => r[0] === 'b' && r[2] === 'hold' && !r[3]), 'orders applied on both peers; the partner squad order is refused');
+}
+
+// ---------------------------------------------------------------- levels: flat maps ignore them, deck maps keep lockstep
+{
+  const w = battle(), w2 = battle();
+  const g = drop(w, 250, 250), g2 = drop(w2, 250, 250);
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 150, y: 520, low: true }).ok && w2.exec({ t: 'order', refs: ['s' + g2], kind: 'move', x: 150, y: 520 }).ok, 'low is accepted on a flat map');
+  run(w, 300); run(w2, 300);
+  const rec = w.orders.byGroup.get(g);
+  assert(w.hash() === w2.hash() && (!rec || (rec.ht === null && rec.tier === 0 && marchPath(w, rec, 250, 250).tiers === null)), 'and changes nothing there: same hash, no tiers');
+}
+const FULL4 = [{ p: [0, 0, 400, 0, 400, 400, 0, 400] }];
+const deckMap = normalizeMap({ format: 'rcmap', v: 2, name: 'fly', source: 'editor', seed: 5, w: 400, h: 400, levels: FULL4, water: [], parks: [], buildings: [],
+  roads: [{ p: [200, 10, 200, 40, 200, 130, 200, 270, 200, 360, 200, 390], z: [0, 0, 1, 1, 0, 0], w: 8, k: 'major' }, { p: [0, 200, 400, 200], w: 12, k: 'major' }] });
+const deckBattle = (owners = 1) => {
+  const w = installCombat(new World(deckMap, { seed: 13, mutators: [...QUIET, 'abilities.apc.unlock=0', 'abilities.apc.delay=0'], sandbox: true, owners }));
+  w.exec({ t: 'loadout.set', abilities: { paratroopers: 4, apc: 2 } });
+  for (let o = 0; o < owners; o++) w.exec({ t: 'ready', owner: o });
+  for (let i = 0; i < w.A.n; i++) if (w.A.type[i] === TYPE.ZOMBIE) w.remove(i);
+  w.A.stun[w.spawn(TYPE.ZOMBIE, 390, 390)] = 1e9;
+  w.step();
+  return w;
+};
+{
+  const w = deckBattle();
+  let snap = null;
+  const script = (ww, n, at) => {
+    for (let k = 1; k <= n; k++) {
+      if (k === 2) { ww.exec({ t: 'ability.use', id: 'paratroopers', x: 100, y: 100 }); ww.exec({ t: 'ability.use', id: 'apc', x: 300, y: 100 }); }
+      if (k === 5) ww.exec({ t: 'order', refs: [...ww.combat.squads.map((s) => 's' + s.group), ...ww.vehicles.map((v) => 'v' + v.id)], kind: 'move', x: 200, y: 200 });
+      ww.step();
+      if (at) at(k);
+    }
+  };
+  script(w, 2000, (k) => { if (k === 300) snap = w.snapshot(); });
+  const onDeck = w.A.tier.slice(0, w.A.n).filter((t) => t === 1).length;
+  assert(onDeck > 5 && w.vehicles.some((v) => v.tier === 1), `a squad and a carrier ordered onto the deck are up there (${onDeck} on it)`);
+  w.restore(snap);
+  for (let o = 0; o < 1; o++) w.exec({ t: 'ready', owner: o });
+  for (let i = 0; i < w.A.n; i++) if (w.A.type[i] === TYPE.ZOMBIE) w.remove(i);
+  w.A.stun[w.spawn(TYPE.ZOMBIE, 390, 390)] = 1e9;
+  w.step();
+  const fresh = deckBattle();
+  fresh.charges = { ...w.charges };
+  script(w, 500); script(fresh, 500);
+  assert(w.hash() === fresh.hash(), 'deck map: a restored world replays orders onto the deck like a fresh one');
+}
+{
+  const wa = deckBattle(2), wb = deckBattle(2);
+  const [la, lb] = makeLoopbackPair({ latency: 6, jitter: 6 });
+  await la.ready; await lb.ready;
+  const da = new LockstepDriver(wa, la, 0, { turnSec: 0.01, maxSteps: 16 });
+  const db = new LockstepDriver(wb, lb, 1, { turnSec: 0.01, maxSteps: 16 });
+  let desync = null;
+  da.onDesync = (e) => { desync = e; }; db.onDesync = (e) => { desync = desync || e; };
+  da.submit({ t: 'ability.use', id: 'paratroopers', x: 100, y: 100 });
+  db.submit({ t: 'ability.use', id: 'apc', x: 300, y: 100 });
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let phase = 0;
+  const t0 = Date.now();
+  while (wa.tick < 900 && Date.now() - t0 < 30000) {
+    await sleep(3);
+    da.advance(0.012); db.advance(0.012);
+    if (phase === 0 && wa.combat.squads.length === 1 && wb.vehicles.length === 1) {
+      da.submit({ t: 'order', refs: ['s' + wa.combat.squads[0].group], kind: 'move', x: 200, y: 200 });
+      db.submit({ t: 'order', refs: ['v' + wb.vehicles[0].id], kind: 'move', x: 200, y: 190 });
+      phase = 1;
+    }
+    if (phase === 1 && wa.tick > 600) { da.submit({ t: 'order', refs: ['s' + wa.combat.squads[0].group], kind: 'move', x: 160, y: 200, low: true }); phase = 2; }
+  }
+  for (let i = 0; i < 300 && db.turn < da.turn; i++) { await sleep(2); db.advance(0.012); }
+  const common = [...da.hashLog.keys()].filter((t) => db.hashLog.has(t));
+  la.close();
+  assert(common.length >= 5 && common.every((t) => da.hashLog.get(t).h === db.hashLog.get(t).h) && !desync, `deck map lockstep with orders onto the deck: hashes equal at ${common.length} checkpoints`);
 }
 
 console.log(process.exitCode ? 'orders: FAILED' : 'orders: all passed');

@@ -2,12 +2,14 @@
 // A road with z (one height per vertex, in tiers) puts its tier-0 cells on the ground as usual; every other cell it
 // covers becomes a node, one per (tier, cell), with field id N + k (N = gw * gh). Tiers: -2, -1 tunnels, 1..3 decks.
 // Nodes link to their same-tier neighbours in nav's compass order (DX/DY); where a road changes tier between two
-// orthogonal cells, a portal links them (ground cells with portals carry lvf bit 4). The ground cell under the first
-// deck cells of a ramp is T.RAMP (an embankment or cutting), so every tier change is one unambiguous step.
+// orthogonal cells, a portal links them (ground cells with portals carry lvf bit 4). The open ground under the first
+// deck cells of a ramp is T.RAMP (an embankment or cutting), so every tier change is one unambiguous step. Where the
+// ramp foot lies under another street (or a building), that cell stays as it is and gets lvf bit 16 (shadow): the
+// orthogonal step into it from the portal cell is the portal, so fields do not route people onto it that way.
 import { T } from '../map/format.js';
 import { distToSeg, clamp } from '../util/geom.js';
 
-export const LV_DECK = 1, LV_TUNNEL = 2, LV_PORTAL = 4, LV_SOLID = 8;
+export const LV_DECK = 1, LV_TUNNEL = 2, LV_PORTAL = 4, LV_SOLID = 8, LV_SHADOW = 16;
 export const TIERS = [-2, -1, 1, 2, 3];
 const SLOT = (t) => (t < 0 ? t + 2 : t + 1);
 const DX = [1, 1, 0, -1, -1, -1, 0, 1], DY = [0, 1, 1, 1, 0, -1, -1, -1];
@@ -16,6 +18,7 @@ WALK[T.OPEN] = 1; WALK[T.ROAD] = 1; WALK[T.PARK] = 1; WALK[T.BRIDGE] = 1; WALK[T
 // (dx, dy) in -1..1 -> compass direction (8 = same cell)
 export const DIR9 = Int8Array.of(5, 6, 7, 4, 8, 0, 3, 2, 1);
 const PIECE_M = 300;
+const CIV_OK = 2;   // nav.js P_CIV
 
 export const tierOfZ = (z) => (z >= 0 ? Math.floor(z + 0.5) : -Math.floor(0.5 - z));
 
@@ -116,7 +119,9 @@ export function buildDecks(map, grid, col, cfg) {
         if (t2 < -2 || t2 > 3) continue;
         if (t2 === 0) {
           const g = qy * gw + qx;
-          if (terrain[c] !== T.RAMP || !WALK[terrain[g]] || !col.ground.has(g * R + road[k])) continue;
+          if (!WALK[terrain[g]] || !col.ground.has(g * R + road[k])) continue;
+          const tc = terrain[c];
+          if (tc === T.OPEN || tc === T.PARK || tc === T.RUBBLE) { terrain[c] = T.RAMP; lvf[c] |= LV_SOLID; }
           nb[base + d] = g; gport.push(g, (d + 4) & 7, N + k);
           break;
         }
@@ -155,6 +160,7 @@ export function buildDecks(map, grid, col, cfg) {
       if (m >= 0 && nb[8 * (m - N) + (((2 * j) + 4) & 7)] === g) dk.pnb[4 * p + j] = m;
     }
     lvf[g] |= LV_PORTAL;
+    for (let j = 0; j < 4; j++) if (dk.pnb[4 * p + j] >= 0) lvf[g + DX[2 * j] + DY[2 * j] * gw] |= LV_SHADOW;
   });
   // diagonals: both sides must be same-tier nodes
   for (let k = 0; k < D; k++) {
@@ -234,6 +240,9 @@ export function nodeAt(dk, t, cx, cy) {
   const k = dk.tstore[b + ((cy & 15) << 4) + (cx & 15)];
   return k < 0 ? -1 : dk.N + k;
 }
+
+// True when a step from ground cell g in compass direction d (orthogonal) takes a portal.
+export function portalStep(dk, g, d) { return (dk.lvf[g] & LV_PORTAL) !== 0 && portalOf(dk, g, d) >= 0; }
 
 // Node reached from ground cell g through its portal in compass direction d (orthogonal), or -1.
 export function portalOf(dk, g, d) {
@@ -323,4 +332,119 @@ export function deckAt(world, x, y) {
     if (sid >= 0) return { id: sid, road: g.bridges[sid].road, alive: !world.bridges || !world.bridges[sid] || world.bridges[sid].alive !== false };
   }
   return null;
+}
+
+// ---------------------------------------------------------------- local graphs
+// The nodes over a window of the grid (ox, oy, lw x lh cells) as a small graph for march fields and A*: ground cell
+// (x, y) of the window is local id y * lw + x and the window's nodes follow from lw * lh, in global order. Shaped like
+// grid.deck (N, gw, nb, lvf, portals, pnb), so DialJob.runLayered and stepField work on it; gid holds each local node's
+// global field id and cell its local ground cell. Links to the window's border cells or past it are dropped. null when
+// the window has no nodes.
+export function windowGraph(dk, ox, oy, lw, lh) {
+  const gw = dk.gw, N = dk.N, LN = lw * lh, tw = dk.tw, tiles = dk.tiles, ks = [];
+  const tx0 = Math.max(0, (ox + 1) >> 4), tx1 = Math.min(tw - 1, (ox + lw - 2) >> 4);
+  const ty0 = Math.max(0, (oy + 1) >> 4), ty1 = Math.min(((dk.gh + 15) >> 4) - 1, (oy + lh - 2) >> 4);
+  for (let s = 0; s < 5; s++) for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+    const b = dk.tix[s * tiles + ty * tw + tx];
+    if (b < 0) continue;
+    for (let j = 0; j < 256; j++) {
+      const k = dk.tstore[b + j];
+      if (k < 0) continue;
+      const c = dk.cell[k], x = c % gw - ox, y = ((c / gw) | 0) - oy;
+      if (x > 0 && y > 0 && x < lw - 1 && y < lh - 1) ks.push(k);
+    }
+  }
+  if (!ks.length) return null;
+  const gid = Int32Array.from(ks).sort(), D = gid.length;
+  const loc = (g) => { const x = g % gw - ox, y = ((g / gw) | 0) - oy; return x > 0 && y > 0 && x < lw - 1 && y < lh - 1 ? y * lw + x : -1; };
+  const cell = new Int32Array(D), tier = new Int8Array(D), nb = new Int32Array(8 * D).fill(-1);
+  for (let j = 0; j < D; j++) {
+    const k = gid[j];
+    cell[j] = loc(dk.cell[k]); tier[j] = dk.tier[k];
+    for (let d = 0; d < 8; d++) {
+      const m = dk.nb[8 * k + d];
+      if (m < 0) continue;
+      if (m < N) nb[8 * j + d] = loc(m);
+      else { const q = bsearch(gid, m - N); if (q >= 0) nb[8 * j + d] = LN + q; }
+    }
+  }
+  for (let j = 0; j < D; j++) gid[j] += N;
+  const lvf = new Uint8Array(LN), P = dk.portals, lp = [], ln = [];
+  let lo = 0, hi = P.length;
+  const first = (oy + 1) * gw;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (P[m] < first) lo = m + 1; else hi = m; }
+  for (let p = lo, last = (oy + lh - 1) * gw; p < P.length && P[p] < last; p++) {
+    const l = loc(P[p]);
+    if (l < 0) continue;
+    let any = false;
+    for (let j = 0; j < 4; j++) {
+      const m = dk.pnb[4 * p + j], q = m < 0 ? -1 : bsearch(gid, m);
+      ln.push(q < 0 ? -1 : LN + q);
+      if (q >= 0) any = true;
+    }
+    if (any) { lp.push(l); lvf[l] |= LV_PORTAL; } else ln.length -= 4;
+  }
+  for (let p = 0, P2 = lp.length; p < P2; p++) for (let j = 0; j < 4; j++) {
+    if (ln[4 * p + j] < 0) continue;
+    const n = lp[p] + DX[2 * j] + DY[2 * j] * lw;
+    if (n >= 0 && n < LN) lvf[n] |= LV_SHADOW;
+  }
+  return { N: LN, gw: lw, gh: lh, D, ox, oy, nb, lvf, portals: Int32Array.from(lp), pnb: Int32Array.from(ln), tier, cell, gid };
+}
+
+function bsearch(a, v) {
+  let lo = 0, hi = a.length - 1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (a[m] === v) return m; if (a[m] < v) lo = m + 1; else hi = m - 1; }
+  return -1;
+}
+
+// Local id in window graph wg (null: ground only) of global field id f, or -1 outside the window's interior.
+export function localOf(wg, f, N, gw, ox, oy, lw, lh) {
+  if (f < N) {
+    const x = f % gw - ox, y = ((f / gw) | 0) - oy;
+    return x > 0 && y > 0 && x < lw - 1 && y < lh - 1 ? y * lw + x : -1;
+  }
+  if (wg === null) return -1;
+  const q = bsearch(wg.gid, f);
+  return q < 0 ? -1 : wg.N + q;
+}
+
+// Field id on tier t at (x, y) (the ground cell for tier 0 or flat maps), -1 when that tier has no node there.
+export function fieldAtT(world, x, y, t) {
+  const g = world.grid, cx = Math.floor(x / g.cell), cy = Math.floor(y / g.cell);
+  if (cx < 0 || cy < 0 || cx >= g.gw || cy >= g.gh) return -1;
+  return !g.deck || !t ? cy * g.gw + cx : nodeAt(g.deck, t, cx, cy);
+}
+
+// Nearest field id on tier t (within maxR cells of a point) whose pass has `bits` and none of `not`, -1 if none.
+export function nearestOnTier(world, x, y, t, bits, not, maxR) {
+  const g = world.grid, pass = world.nav.pass, dk = g.deck, cx0 = Math.floor(x / g.cell), cy0 = Math.floor(y / g.cell);
+  let best = -1, bd = Infinity;
+  for (let r = 0; r <= maxR && best < 0; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const cx = cx0 + dx, cy = cy0 + dy;
+      if (cx < 1 || cy < 1 || cx >= g.gw - 1 || cy >= g.gh - 1) continue;
+      const f = t === 0 ? cy * g.gw + cx : nodeAt(dk, t, cx, cy);
+      if (f < 0 || !(pass[f] & bits) || (pass[f] & not)) continue;
+      const d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = f; }
+    }
+  }
+  return best;
+}
+
+// The tier an order aimed at (x, y) goes to: the top surface there; `low` takes the level under it (the ground under a
+// deck, a tunnel under the ground). A click on ground nobody can stand on over an open tunnel goes into the tunnel.
+export function orderTier(world, x, y, low = false) {
+  const g = world.grid, dk = g.deck;
+  if (!dk) return 0;
+  const cx = Math.floor(x / g.cell), cy = Math.floor(y / g.cell);
+  if (cx < 1 || cy < 1 || cx >= g.gw - 1 || cy >= g.gh - 1) return 0;
+  const pass = world.nav.pass, c = cy * g.gw + cx, top = surfaceAt(world, x, y);
+  const open = (t) => { const f = nodeAt(dk, t, cx, cy); return f >= 0 && (pass[f] & CIV_OK) !== 0; };
+  if (top > 0 && !low) return top;
+  if (top > 0) { for (let t = top - 1; t >= 1; t--) if (open(t)) return t; return 0; }
+  if ((dk.lvf[c] & LV_TUNNEL) && (low || !(pass[c] & CIV_OK))) { if (open(-1)) return -1; if (open(-2)) return -2; }
+  return 0;
 }

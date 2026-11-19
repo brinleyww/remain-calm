@@ -6,7 +6,7 @@ import { damageWallCell } from './structures.js';
 import { explodeAt } from './mutants.js';
 import { fireKey } from './fire.js';
 import { pickDirect, addClaim } from './combat.js';
-import { LV_PORTAL, DIR9, nodeAt, portalOf, stepField, lineClearField } from './decks.js';
+import { LV_PORTAL, DIR9, nodeAt, portalOf, stepField, lineClearField, localOf } from './decks.js';
 
 export const FREE = 0, CIV = 1, ZOMBIE = 2, TURNING = 3, POLICE = 4, MILITIA = 5, SOLDIER = 6;
 export const TYPE = Object.freeze({ FREE, CIV, ZOMBIE, TURNING, POLICE, MILITIA, SOLDIER });
@@ -1147,7 +1147,7 @@ function marchSteer(W, i, mr, spd) {
   const F = mr.field;
   if (!F) { W.VX[i] = 0; W.VY[i] = 0; return true; }
   const x = W.X[i], y = W.Y[i], hx = W.home[2 * i] - x, hy = W.home[2 * i + 1] - y;
-  if (hx * hx + hy * hy < 36) { W.PC[i] = -1; return false; }
+  if (hx * hx + hy * hy < 36 && (mr.ht === null || mr.ht.get(i) === 0)) { W.PC[i] = -1; return false; }
   let c = ((y * W.inv) | 0) * W.gw + ((x * W.inv) | 0);
   if (W.aux[i] & PART) c = sideCell(W, c, x, y);
   const cx = c % W.gw, cy = (c / W.gw) | 0, lw = F.lw, lx = cx - F.ox, ly = cy - F.oy;
@@ -1653,12 +1653,11 @@ function updateTurningD(W, i) {
 }
 
 function marchSteerD(W, i, mr, spd) {
-  // march fields cover the ground only: someone on a deck or in a tunnel leaves the march
-  if (W.deck !== null && W.TIER[i] !== 0) { W.PC[i] = -1; return false; }
   const F = mr.field;
   if (!F) { W.VX[i] = 0; W.VY[i] = 0; return true; }
   const x = W.X[i], y = W.Y[i], hx = W.home[2 * i] - x, hy = W.home[2 * i + 1] - y;
-  if (hx * hx + hy * hy < 36) { W.PC[i] = -1; return false; }
+  if (hx * hx + hy * hy < 36 && (mr.ht === null || mr.ht.get(i) === W.TIER[i])) { W.PC[i] = -1; return false; }
+  if (W.deck !== null && W.TIER[i] !== 0) return marchNode(W, i, mr, F, spd);
   let c = ((y * W.inv) | 0) * W.gw + ((x * W.inv) | 0);
   if (W.aux[i] & PART) c = sideCell(W, c, x, y);
   const cx = c % W.gw, cy = (c / W.gw) | 0, lw = F.lw, lx = cx - F.ox, ly = cy - F.oy;
@@ -1679,6 +1678,29 @@ function marchSteerD(W, i, mr, spd) {
   let f = 1;
   if (mr.med >= 0) { const ahead = mr.med - F.dist[l]; f = ahead > 60 ? 0.15 : ahead > 20 ? 0.6 : ahead < -20 ? 1.15 : 1; }
   steerTo(W, i, (ax + 0.5) * W.cs, (ay + 0.5) * W.cs, spd * f);
+  return true;
+}
+
+// marchSteerD for a member on a deck or in a tunnel: the same walk over the field's nodes (F.wg) and their links.
+function marchNode(W, i, mr, F, spd) {
+  const x = W.X[i], y = W.Y[i], cx = (x * W.inv) | 0, cy = (y * W.inv) | 0, wg = F.wg;
+  const f = wg === null ? -1 : nodeAt(W.deck, W.TIER[i], cx, cy);
+  let l = f < 0 ? -1 : localOf(wg, f, W.N, W.gw, F.ox, F.oy, F.lw, F.lh), ax, ay;
+  const d0 = l >= 0 ? F.dir[l] : 255;
+  if (d0 === 8) { W.PC[i] = -1; return false; }
+  if (d0 < 8) {
+    ax = cx + DX[d0]; ay = cy + DY[d0];
+    const n1 = stepField(wg, l, DX[d0], DY[d0]), d1 = n1 >= 0 ? F.dir[n1] : 255, dd = (d1 - d0) & 7;
+    if (d1 < 8 && (dd <= 1 || dd === 7)) { ax += DX[d1] * 0.5; ay += DY[d1] * 0.5; }
+  } else {
+    let best = -1, bd = 0xFFFFFFFF, bn = -1;
+    if (l >= 0) for (let d = 0; d < 8; d++) { const n = stepField(wg, l, DX[d], DY[d]); if (n >= 0 && F.dir[n] <= 8 && F.dist[n] < bd) { bd = F.dist[n]; best = d; bn = n; } }
+    if (best < 0) { W.PC[i] = -1; W.home[2 * i] = x; W.home[2 * i + 1] = y; return false; }
+    ax = cx + DX[best]; ay = cy + DY[best]; l = bn;
+  }
+  let k = 1;
+  if (mr.med >= 0) { const ahead = mr.med - F.dist[l]; k = ahead > 60 ? 0.15 : ahead > 20 ? 0.6 : ahead < -20 ? 1.15 : 1; }
+  steerTo(W, i, (ax + 0.5) * W.cs, (ay + 0.5) * W.cs, spd * k);
   return true;
 }
 

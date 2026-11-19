@@ -14,6 +14,7 @@ const ORDER_BTNS = [['orderMove', 'Move'], ['orderHunt', 'Hunt'], ['orderHold', 
 const MODE_LABEL = { moving: 'moving', hunting: 'hunting', holding: 'holding', move: 'moving', hunt: 'hunting', hold: 'holding', return: 'going back' };
 const MEMBER_RING_ZOOM = 1.6; // CSS px per metre from which each member gets its own ring
 const REFRESH = 0.25;
+const levelTag = (t) => (t > 0 ? `DECK ${t}` : t < 0 ? 'TUNNEL' : null);
 
 export class Army {
   constructor(s) {
@@ -144,7 +145,7 @@ export class Army {
   // everything there (builds, squads, the building, the zone...). Shift-click adds or drops troops only.
   click(e) {
     const s = this.s;
-    if (this.aim) { this.aim = false; this.order('move', e.wx, e.wy); s.canvas.style.cursor = s.tool.cursor(); return; }
+    if (this.aim) { this.aim = false; this.order('move', e.wx, e.wy, this.low(e)); s.canvas.style.cursor = s.tool.cursor(); return; }
     if (e.shift) {
       const ref = this.pick(e);
       if (!ref) return;
@@ -203,9 +204,12 @@ export class Army {
   rightClick(e) {
     if (!this.refs.size) return false;
     this.aim = false;
-    this.order('move', e.wx, e.wy);
+    this.order('move', e.wx, e.wy, this.low(e));
     return true;
   }
+
+  // With the decks faded (L) or Alt held, a move goes to the level under the top one (the ground under a deck).
+  low(e) { return !!(this.world.grid && this.world.grid.deck) && (!!e.alt || !!this.s.fadeDecks); }
 
   cancel() {
     if (this.aim) { this.aim = false; this.render(); this.s.canvas.style.cursor = this.s.tool.cursor(); return true; }
@@ -216,7 +220,7 @@ export class Army {
   cursor() { return this.aim ? 'crosshair' : 'default'; }
 
   label() {
-    if (this.aim) return { title: 'MOVE', ok: null, note: 'click the destination · Esc cancels' };
+    if (this.aim) return { title: 'MOVE', ok: null, note: this.world.grid && this.world.grid.deck ? 'click the destination (Alt: the level under) · Esc cancels' : 'click the destination · Esc cancels' };
     if (this.box) return { title: 'SELECT', ok: null, note: 'own squads and vehicles in the box' };
     return null;
   }
@@ -238,13 +242,13 @@ export class Army {
     return true;
   }
 
-  order(kind, x, y) {
+  order(kind, x, y, low = false) {
     const s = this.s;
     this.refresh();
     const refs = [...this.refs];
     if (!refs.length) return null;
     const cmd = { t: 'order', refs, kind };
-    if (kind === 'move') { cmd.x = Math.round(x * 10) / 10; cmd.y = Math.round(y * 10) / 10; }
+    if (kind === 'move') { cmd.x = Math.round(x * 10) / 10; cmd.y = Math.round(y * 10) / 10; if (low) cmd.low = true; }
     const r = s.issue(cmd);
     if (r && r.ok && kind === 'move') this.pings.push({ x: cmd.x, y: cmd.y, rt0: s.rt });
     this.render();
@@ -479,7 +483,7 @@ export class Army {
         const tx = (o.x - ox) * z, ty = (o.y - oy) * z;
         ctx.strokeStyle = rgba(col, 0.8); ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke(); ctx.setLineDash([]);
-        this.target(ctx, tx, ty, pal, o.kind === 'return' ? 'HOME' : null);
+        this.target(ctx, tx, ty, pal, o.kind === 'return' ? 'HOME' : levelTag(o.tier));
       }
     }
     for (const p of this.pings) {
@@ -499,14 +503,21 @@ export class Army {
     }
     const tx = (rec.dx - ox) * z, ty = (rec.dy - oy) * z;
     if (i >= 0) {
-      const p = marchPath(w, rec, A.x[i], A.y[i]);
-      ctx.beginPath();
-      for (let k = 0; k < p.length; k += 2) { const sx = (p[k] - ox) * z, sy = (p[k + 1] - oy) * z; k ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }
+      const p = marchPath(w, rec, A.x[i], A.y[i], 1500, w.grid.deck ? A.tier[i] : 0), tr = p.tiers;
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = rgba(pal.card, 0.7); ctx.lineWidth = 3; ctx.stroke();
-      ctx.strokeStyle = pal.select; ctx.lineWidth = 1.25; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+      // runs underground (both ends in a tunnel) are drawn faint, like the people in them
+      for (let k0 = 0; k0 + 2 < p.length;) {
+        const under = !!tr && tr[k0 >> 1] < 0 && tr[(k0 >> 1) + 1] < 0;
+        let k1 = k0 + 2;
+        while (k1 + 2 < p.length && (!!tr && tr[k1 >> 1] < 0 && tr[(k1 >> 1) + 1] < 0) === under) k1 += 2;
+        ctx.beginPath();
+        for (let k = k0; k <= k1; k += 2) { const sx = (p[k] - ox) * z, sy = (p[k + 1] - oy) * z; k > k0 ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }
+        ctx.strokeStyle = rgba(pal.card, under ? 0.35 : 0.7); ctx.lineWidth = 3; ctx.stroke();
+        ctx.strokeStyle = under ? rgba(pal.select, 0.45) : pal.select; ctx.lineWidth = 1.25; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+        k0 = k1;
+      }
     }
-    this.target(ctx, tx, ty, pal, rec.kind === 'return' ? 'ZONE' : null);
+    this.target(ctx, tx, ty, pal, rec.kind === 'return' ? 'ZONE' : levelTag(rec.tier));
   }
 
   // Destination mark: a ringed cross with registration ticks.

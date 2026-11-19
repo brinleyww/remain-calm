@@ -1339,16 +1339,19 @@ export class WorldRenderer {
     if (nStroke) { ctx.strokeStyle = pal.amber; ctx.lineWidth = 1.5; ctx.stroke(stroked); }
   }
 
-  // air: undefined draws every vehicle; true / false only aircraft / only the ones on the ground or water
+  // air: undefined draws every vehicle; true / false only what is above the decks (aircraft, vehicles on a deck) / the
+  // rest (on the ground or water; in a tunnel faintly)
   _vehicles(ctx, world, cam, st, air) {
     const list = world.vehicles;
     if (!list || !list.length) return;
     const pal = this.pal, z = cam.zoom;
     for (const v of list) {
       if (!v || v.alive === false) continue;
-      if (air !== undefined && AIR.has(v.kind) !== air) continue;
+      if (air !== undefined && (AIR.has(v.kind) || v.tier > 0) !== air) continue;
       const sx = (v.x - cam.x) * z, sy = (v.y - cam.y) * z;
       if (sx < -60 || sy < -60 || sx > cam.w + 60 || sy > cam.h + 60) continue;
+      const faint = v.tier < 0 && !AIR.has(v.kind);
+      if (faint) { ctx.save(); ctx.globalAlpha = 0.3; }
       const col = world.owners > 1 && v.owner > 0 ? pal.carbon : pal.ink;
       const r = v.boat ? drawBoat(ctx, v, sx, sy, z, pal, col, world) : drawVehicleGlyph(ctx, v, sx, sy, z, pal, st.rt, col);
       if (v.hpMax > 0 && v.hp < v.hpMax) {
@@ -1357,6 +1360,7 @@ export class WorldRenderer {
         ctx.fillStyle = f < 0.35 ? pal.stamp : pal.ink; ctx.fillRect(sx - w / 2, sy + r + 4, w * f, 2);
       }
       if (v.loaded > 0) tag(ctx, `${v.loaded} aboard`, sx + r + 4, sy - r - 10, pal, pal.carbon);
+      if (faint) ctx.restore();
     }
   }
 

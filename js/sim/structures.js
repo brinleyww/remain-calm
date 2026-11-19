@@ -157,8 +157,10 @@ export function damageBridge(world, id, dmg) {
   return true;
 }
 
-// A deck piece gives way: its nodes close, the people on it fall (swimmers over water drop into it), and the land
-// under it turns to rubble.
+const AIR_KINDS = new Set(['heli', 'gunship', 'medevac', 'plane']);
+
+// A deck piece gives way: its nodes close, the people and vehicles on it fall (swimmers over water drop into it), and
+// the land under it turns to rubble.
 function deckDown(world, id) {
   const g = world.grid, dk = g.deck, gb = g.bridges[id], br = world.bridges[id], cs = g.cell, A = world.A;
   updatePassCells(world, gb.nodes);
@@ -172,6 +174,12 @@ function deckDown(world, id) {
   });
   for (const i of swim) A.tier[i] = 0;
   for (const i of victims) killOutright(world, i, 'fall');
+  // vehicles on it go down with it
+  if (world.combat && world.combat.dropVehicle) for (const v of world.vehicles) {
+    if (!v || v.alive === false || !(v.tier > 0) || AIR_KINDS.has(v.kind)) continue;
+    const f = nodeAt(dk, v.tier, Math.floor(v.x / cs), Math.floor(v.y / cs));
+    if (f >= 0 && dk.sid[f - dk.N] === id) world.combat.dropVehicle(v);
+  }
   const changed = [];
   for (const c of gb.cells) {
     const t = g.terrain[c];

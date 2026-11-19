@@ -5,7 +5,7 @@
 // On maps with decks (grid.deck) every per-cell array and field also covers the deck and tunnel nodes: field ids
 // N + k after the N ground cells (see decks.js).
 import { T } from '../map/format.js';
-import { LV_DECK, LV_TUNNEL, LV_PORTAL, TIERS, nodeAt } from './decks.js';
+import { LV_DECK, LV_TUNNEL, LV_PORTAL, LV_SHADOW, TIERS, nodeAt, portalStep } from './decks.js';
 
 export const P_IN = 1, P_CIV = 2, P_ZOM = 4, P_SWIM = 8, P_SLOW = 16, P_WALL = 32, P_GATE = 64, P_WATER = 128;
 export const INF = 0xFFFFFFFF;
@@ -104,17 +104,20 @@ export class DialJob {
         }
         continue;
       }
-      const ce = cost[c + 1], cw = cost[c - 1], cs = cost[c + gw], cn = cost[c - gw];
-      if (ce) { nd = cur + 10 * (ce & 127); if (nd < dist[c + 1]) { dist[c + 1] = nd; dir[c + 1] = 4; buckets[nd & mask].push(c + 1); pending++; } }
-      if (cw) { nd = cur + 10 * (cw & 127); if (nd < dist[c - 1]) { dist[c - 1] = nd; dir[c - 1] = 0; buckets[nd & mask].push(c - 1); pending++; } }
-      if (cs) { nd = cur + 10 * (cs & 127); if (nd < dist[c + gw]) { dist[c + gw] = nd; dir[c + gw] = 6; buckets[nd & mask].push(c + gw); pending++; } }
-      if (cn) { nd = cur + 10 * (cn & 127); if (nd < dist[c - gw]) { dist[c - gw] = nd; dir[c - gw] = 2; buckets[nd & mask].push(c - gw); pending++; } }
+      const ce = cost[c + 1], cw = cost[c - 1], cs = cost[c + gw], cn = cost[c - gw], lf = lvf[c];
+      let re = ce, rw = cw, rs = cs, rn = cn;
+      // a shadowed cell is not reached from a neighbour whose step toward it is a portal
+      if (lf & LV_SHADOW) { if (re && portalStep(dk, c + 1, 4)) re = 0; if (rw && portalStep(dk, c - 1, 0)) rw = 0; if (rs && portalStep(dk, c + gw, 6)) rs = 0; if (rn && portalStep(dk, c - gw, 2)) rn = 0; }
+      if (re) { nd = cur + 10 * (re & 127); if (nd < dist[c + 1]) { dist[c + 1] = nd; dir[c + 1] = 4; buckets[nd & mask].push(c + 1); pending++; } }
+      if (rw) { nd = cur + 10 * (rw & 127); if (nd < dist[c - 1]) { dist[c - 1] = nd; dir[c - 1] = 0; buckets[nd & mask].push(c - 1); pending++; } }
+      if (rs) { nd = cur + 10 * (rs & 127); if (nd < dist[c + gw]) { dist[c + gw] = nd; dir[c + gw] = 6; buckets[nd & mask].push(c + gw); pending++; } }
+      if (rn) { nd = cur + 10 * (rn & 127); if (nd < dist[c - gw]) { dist[c - gw] = nd; dir[c - gw] = 2; buckets[nd & mask].push(c - gw); pending++; } }
       const okE = ce !== 0 && ce < BARRIER, okW = cw !== 0 && cw < BARRIER, okS = cs !== 0 && cs < BARRIER, okN = cn !== 0 && cn < BARRIER;
       if (okE && okS) { n = c + gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 5; buckets[nd & mask].push(n); pending++; } } }
       if (okW && okS) { n = c + gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 7; buckets[nd & mask].push(n); pending++; } } }
       if (okW && okN) { n = c - gw - 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 1; buckets[nd & mask].push(n); pending++; } } }
       if (okE && okN) { n = c - gw + 1; k = cost[n]; if (k) { nd = cur + 14 * (k & 127); if (nd < dist[n]) { dist[n] = nd; dir[n] = 3; buckets[nd & mask].push(n); pending++; } } }
-      if (lvf[c] & LV_PORTAL) {
+      if (lf & LV_PORTAL) {
         let lo = 0, hi = P.length - 1, p = -1;
         while (lo <= hi) { const m = (lo + hi) >> 1; if (P[m] === c) { p = m; break; } if (P[m] < c) lo = m + 1; else hi = m - 1; }
         for (let j = 0; p >= 0 && j < 4; j++) {
@@ -329,8 +332,8 @@ function startCivField(world, urgent) {
     const x0 = Math.max(1, Math.floor((pk.x - r) / cs)), x1 = Math.min(g.gw - 2, Math.floor((pk.x + r) / cs));
     const y0 = Math.max(1, Math.floor((pk.y - r) / cs)), y1 = Math.min(g.gh - 2, Math.floor((pk.y + r) / cs));
     for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-      const c = y * g.gw + x, dx = (x + 0.5) * cs - pk.x, dy = (y + 0.5) * cs - pk.y;
-      if (dx * dx + dy * dy <= r * r && nav.civCost[c]) job.source(c);
+      const c = dk !== null && pk.tier ? nodeAt(dk, pk.tier, x, y) : y * g.gw + x, dx = (x + 0.5) * cs - pk.x, dy = (y + 0.5) * cs - pk.y;
+      if (c >= 0 && dx * dx + dy * dy <= r * r && nav.civCost[c]) job.source(c);
     }
     pk.fx = pk.x; pk.fy = pk.y;
   }

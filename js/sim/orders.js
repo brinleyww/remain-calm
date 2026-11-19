@@ -3,8 +3,11 @@
 // window around the squad and its slots (Dial's algorithm from nav.js, built over a few ticks when large). Members
 // walk down the field (agents.js marchSteer), so walls and gates are respected and nobody needs a path of their own.
 // Vehicles flagged `commandable` only get `v.order`; their own update code carries it out.
-import { DialJob, P_CIV, P_GATE, DX, DY } from './nav.js';
+// On maps with decks the target is on the top level at the point (or the one under it, `low`), formation slots spread
+// on that level, and the fields also cover the window's deck and tunnel nodes (decks.js windowGraph).
+import { DialJob, P_CIV, P_GATE, DX, DY, INF } from './nav.js';
 import { POLICE, MILITIA, SOLDIER, MILITIA_GROUP, SQUAD_GROUP } from './agents.js';
+import { windowGraph, localOf, fieldAtT, fieldOf, nearestOnTier, orderTier, nodeAt, stepField, tierOf, groundOf } from './decks.js';
 
 const KIND_CODE = { move: 1, hunt: 2, hold: 3, return: 4 };
 const BUILD_EXEC = 150000, BUILD_TICK = 20000; // field cells expanded in the order's own tick / in each later tick
@@ -118,11 +121,12 @@ function quoteOrder(w, cmd) {
   }
   let groups = want.groups.filter((g) => members.has(g));
   if (!groups.length && !vehicles.length) return fail('Nothing left to command');
-  let cell = -1;
+  let cell = -1, tier = 0;
   if (kind === 'move') {
     if (!Number.isFinite(+cmd.x) || !Number.isFinite(+cmd.y)) return fail('Pick a destination');
+    if (w.grid.deck) tier = orderTier(w, +cmd.x, +cmd.y, cmd.low === true);
     if (groups.length) {
-      cell = nearestOpen(w, +cmd.x, +cmd.y, SNAP_CELLS);
+      cell = w.grid.deck ? nearestOpenT(w, +cmd.x, +cmd.y, tier) : nearestOpen(w, +cmd.x, +cmd.y, SNAP_CELLS);
       if (cell < 0) { if (!vehicles.length) return fail('No open ground there'); groups = []; }
     }
   } else if (kind === 'return' && groups.length && !ownZones(w, owner).length) {
@@ -130,7 +134,7 @@ function quoteOrder(w, cmd) {
     if (!vehicles.length) return fail('No safe zone with a gate to fall back to');
     groups = [];
   }
-  return { ok: true, cost: 0, groups, members, vehicles, cell };
+  return { ok: true, cost: 0, groups, members, vehicles, cell, tier };
 }
 
 function execOrder(w, cmd, q) {
@@ -151,8 +155,8 @@ function execOrder(w, cmd, q) {
   }
   let squads = 0;
   if (kind === 'move' && q.groups.length) {
-    const g = w.grid, list = q.groups.map((grp) => ({ group: grp, members: q.members.get(grp) }));
-    const dx = (q.cell % g.gw + 0.5) * g.cell, dy = (((q.cell / g.gw) | 0) + 0.5) * g.cell;
+    const g = w.grid, list = q.groups.map((grp) => ({ group: grp, members: q.members.get(grp) })), gc = g.deck ? groundOf(g.deck, q.cell) : q.cell;
+    const dx = (gc % g.gw + 0.5) * g.cell, dy = (((gc / g.gw) | 0) + 0.5) * g.cell;
     squads = march(w, list, kind, owner, +cmd.x, +cmd.y, q.cell, dx, dy, 0);
   } else if (kind === 'return' && q.groups.length) {
     const byZone = new Map();
@@ -177,6 +181,7 @@ function execOrder(w, cmd, q) {
     }
     else if (kind !== 'move') { x = v.x; y = v.y; }
     v.order = { kind, x, y, t: w.t, done: false };
+    if (w.grid.deck) v.order.tier = kind === 'move' ? q.tier : v.tier | 0;
     vehicles++;
   }
   if (O.jobs.length) runJobs(w, BUILD_EXEC);
@@ -189,7 +194,7 @@ function march(w, list, kind, owner, tx, ty, cell, dx, dy, zone) {
   const A = w.A, O = w.orders;
   let total = 0;
   for (const e of list) total += e.members.length;
-  const slots = formation(w, cell, total, zone);
+  const slots = formation(w, cell, total, zone), st = slots.tiers || null;
   let base = 0;
   for (const e of list) {
     const n = e.members.length;
@@ -197,13 +202,13 @@ function march(w, list, kind, owner, tx, ty, cell, dx, dy, zone) {
       id: O.nextId++, group: e.group, owner, kind, tx, ty, dx, dy, zone,
       members: Int32Array.from(e.members), slotCells: null,
       field: null, build: null, wide: false, probes: 0, ver: w.nav.version, verT: w.tick,
-      med: -1, lead: -1, t0: w.t, until: Infinity,
+      med: -1, lead: -1, t0: w.t, until: Infinity, tier: st ? tierOf(w.grid.deck, cell) : 0, ht: st ? new Map() : null,
     };
     const cells = new Set();
     for (let k = 0; k < n; k++) {
       const i = rec.members[k], sx = slots[2 * (base + k)], sy = slots[2 * (base + k) + 1];
       A.home[2 * i] = sx; A.home[2 * i + 1] = sy; A.pc[i] = rec.id; A.state[i] = 0; A.vx[i] = 0; A.vy[i] = 0;
-      cells.add(w.cellAt(sx, sy));
+      if (st) { rec.ht.set(i, st[base + k]); cells.add(fieldAtT(w, sx, sy, st[base + k])); } else cells.add(w.cellAt(sx, sy));
     }
     rec.slotCells = Int32Array.from([...cells].filter((c) => c >= 0).sort((a, b) => a - b));
     base += n;
@@ -217,6 +222,7 @@ function march(w, list, kind, owner, tx, ty, cell, dx, dy, zone) {
 // Formation slots: cells in breadth-first order from `start` over open ground (no gates; inside zone `zone` when > 0),
 // two people to a cell, more per cell when the ground runs out.
 export function formation(w, start, count, zone = 0) {
+  if (w.grid.deck) return formationT(w, start, count, zone);
   const g = w.grid, gw = g.gw, cs = g.cell, pass = w.nav.pass, zid = w.zoneId;
   const open = (c) => (pass[c] & P_CIV) !== 0 && !(pass[c] & P_GATE) && (zone <= 0 || zid[c] === zone);
   const need = Math.max(1, Math.min(4000, Math.ceil(count / 2)));
@@ -237,6 +243,38 @@ export function formation(w, start, count, zone = 0) {
     out[2 * k + 1] = (((c / gw) | 0) + 0.5) * cs + OFF[o + 1];
   }
   return out;
+}
+
+// formation() on a map with decks: `start` is a field id and the slots spread over its links (up and down the ramps
+// too); out.tiers holds each slot's tier.
+function formationT(w, start, count, zone) {
+  const g = w.grid, gw = g.gw, cs = g.cell, pass = w.nav.pass, zid = w.zoneId, dk = g.deck, N = dk.N;
+  const open = (f) => f >= 0 && (pass[f] & P_CIV) !== 0 && !(pass[f] & P_GATE) && (zone <= 0 || zid[f < N ? f : dk.cell[f - N]] === zone);
+  const need = Math.max(1, Math.min(4000, Math.ceil(count / 2)));
+  const cells = [start], seen = new Set(cells);
+  for (let h = 0; h < cells.length && cells.length < need; h++) {
+    const c = cells[h];
+    for (let d = 0; d < 8 && cells.length < need; d++) {
+      const nb = stepField(dk, c, DX[d], DY[d]);
+      if (nb < 0 || seen.has(nb) || !open(nb)) continue;
+      if ((d & 1) && (c < N ? !open(c + DX[d]) || !open(c + DY[d] * gw) : !open(stepField(dk, c, DX[d], 0)) || !open(stepField(dk, c, 0, DY[d])))) continue;
+      seen.add(nb); cells.push(nb);
+    }
+  }
+  const out = new Float32Array(count * 2), L = cells.length, tiers = out.tiers = new Int8Array(count);
+  for (let k = 0; k < count; k++) {
+    const j = k >> 1, f = cells[j % L], c = f < N ? f : dk.cell[f - N], lap = Math.min(3, (j / L) | 0), o = (lap * 2 + (k & 1)) * 2;
+    out[2 * k] = (c % gw + 0.5) * cs + OFF[o];
+    out[2 * k + 1] = (((c / gw) | 0) + 0.5) * cs + OFF[o + 1];
+    tiers[k] = f < N ? 0 : dk.tier[f - N];
+  }
+  return out;
+}
+
+// Nearest open field id on tier t near a point (else on the ground), -1 if none.
+function nearestOpenT(w, x, y, t) {
+  const f = nearestOnTier(w, x, y, t, P_CIV, P_GATE, SNAP_CELLS);
+  return f >= 0 || t === 0 ? f : nearestOnTier(w, x, y, 0, P_CIV, P_GATE, SNAP_CELLS);
 }
 
 // Nearest open (walkable, not a gate) cell within maxR cells of a point, -1 if none.
@@ -302,20 +340,22 @@ function startBuild(w, rec, phase, wide) {
   const m = wide ? Math.max(120, Math.round(span * 0.75)) : Math.min(64, Math.max(24, Math.round(span * 0.35)));
   let ox = Math.max(0, x0 - m), oy = Math.max(0, y0 - m), ex = Math.min(gw - 1, x1 + m), ey = Math.min(gh - 1, y1 + m);
   if (wide && (ex - ox + 1) * (ey - oy + 1) > 0.6 * gw * gh) { ox = 0; oy = 0; ex = gw - 1; ey = gh - 1; }
-  const lw = ex - ox + 1, lh = ey - oy + 1, cost = new Uint8Array(lw * lh), src = nav.civCost;
+  const lw = ex - ox + 1, lh = ey - oy + 1, LN = lw * lh, dk = g.deck, wg = dk ? windowGraph(dk, ox, oy, lw, lh) : null;
+  const cost = new Uint8Array(LN + (wg ? wg.D : 0)), src = nav.civCost;
   let open = 0;
   for (let y = 1; y < lh - 1; y++) {
     const row = (y + oy) * gw + ox;
     for (let x = 1; x < lw - 1; x++) { const k = src[row + x]; if (k) { cost[y * lw + x] = k; open++; } }
   }
-  const job = new DialJob(lw * lh, lw);
-  job.begin(cost, Math.max(1, nav.k.rubble));
-  const local = (c) => { const lx = c % gw - ox, ly = ((c / gw) | 0) - oy; return lx > 0 && ly > 0 && lx < lw - 1 && ly < lh - 1 ? ly * lw + lx : -1; };
+  if (wg) for (let j = 0; j < wg.D; j++) { const k = src[wg.gid[j]]; if (k) { cost[LN + j] = k; open++; } }
+  const job = new DialJob(cost.length, lw);
+  job.begin(cost, Math.max(1, nav.k.rubble), INF, wg);
+  const N = gw * gh, local = (c) => (c < 0 ? -1 : localOf(wg, c, N, gw, ox, oy, lw, lh));
   if (phase === 'probe') {
-    for (const i of rec.members) if (marching(A, i, rec)) { const l = local(w.cellAt(A.x[i], A.y[i])); if (l >= 0 && cost[l]) job.source(l); }
+    for (const i of rec.members) if (marching(A, i, rec)) { const l = local(dk ? fieldOf(w, i) : w.cellAt(A.x[i], A.y[i])); if (l >= 0 && cost[l]) job.source(l); }
   } else for (const c of rec.slotCells) { const l = local(c); if (l >= 0 && cost[l]) job.source(l); }
   if (!rec.build) w.orders.jobs.push(rec);
-  rec.build = { phase, wide, job, ox, oy, lw, lh, cost, open, used: 0 };
+  rec.build = { phase, wide, job, ox, oy, lw, lh, cost, open, used: 0, wg };
 }
 
 function runJobs(w, budget) {
@@ -333,9 +373,18 @@ function runJobs(w, budget) {
 
 const marching = (A, i, rec) => A.type[i] >= POLICE && A.group[i] === rec.group && A.pc[i] === rec.id;
 
-// Local index of the field cell a member uses (its own cell, else a covered neighbour), -1 when none.
+// Local index of the field cell a member uses (its own cell or node, else a covered neighbour), -1 when none.
 function memberCell(w, F, i) {
-  const g = w.grid, A = w.A, cx = Math.floor(A.x[i] / g.cell) - F.ox, cy = Math.floor(A.y[i] / g.cell) - F.oy;
+  const g = w.grid, A = w.A;
+  if (g.deck && A.tier[i] !== 0) {
+    const f = nodeAt(g.deck, A.tier[i], Math.floor(A.x[i] / g.cell), Math.floor(A.y[i] / g.cell));
+    const l = f < 0 || !F.wg ? -1 : localOf(F.wg, f, g.deck.N, g.gw, F.ox, F.oy, F.lw, F.lh);
+    if (l < 0) return -1;
+    if (F.dir[l] !== 255) return l;
+    for (let d = 0; d < 8; d++) { const n = stepField(F.wg, l, DX[d], DY[d]); if (n >= 0 && F.dir[n] !== 255) return n; }
+    return -1;
+  }
+  const cx = Math.floor(A.x[i] / g.cell) - F.ox, cy = Math.floor(A.y[i] / g.cell) - F.oy;
   if (cx < 1 || cy < 1 || cx >= F.lw - 1 || cy >= F.lh - 1) return -1;
   const l = cy * F.lw + cx;
   if (F.dir[l] !== 255) return l;
@@ -359,7 +408,7 @@ function boxedIn(w, c, limit = 400) {
 }
 
 function finishBuild(w, rec, b) {
-  const A = w.A, F = { ox: b.ox, oy: b.oy, lw: b.lw, lh: b.lh, cost: b.cost, dir: b.job.dir, dist: b.job.dist };
+  const A = w.A, F = { ox: b.ox, oy: b.oy, lw: b.lw, lh: b.lh, cost: b.cost, dir: b.job.dir, dist: b.job.dist, wg: b.wg };
   if (b.phase === 'probe') {
     // nothing could reach the slots: walk to the reachable cell nearest the target instead
     const g = w.grid, cs = g.cell;
@@ -372,12 +421,25 @@ function finishBuild(w, rec, b) {
       const ex = (lx + F.ox + 0.5) * cs - rec.tx, ey = (ly + F.oy + 0.5) * cs - rec.ty, d = ex * ex + ey * ey;
       if (d < bd) { bd = d; best = c; }
     }
+    const wg = F.wg, LN = F.lw * F.lh;
+    if (wg) for (let j = 0; j < wg.D; j++) {
+      const l = LN + j, f = wg.gid[j];
+      if (F.dir[l] === 255 || !F.cost[l] || (w.nav.pass[f] & P_GATE)) continue;
+      const lx = wg.cell[j] % F.lw, ly = (wg.cell[j] / F.lw) | 0;
+      const ex = (lx + F.ox + 0.5) * cs - rec.tx, ey = (ly + F.oy + 0.5) * cs - rec.ty, d = ex * ex + ey * ey;
+      if (d < bd) { bd = d; best = f; }
+    }
     if (best < 0) { releaseRec(w, rec); return; }
-    rec.dx = (best % g.gw + 0.5) * cs; rec.dy = (((best / g.gw) | 0) + 0.5) * cs;
+    const bc = g.deck ? groundOf(g.deck, best) : best;
+    rec.dx = (bc % g.gw + 0.5) * cs; rec.dy = (((bc / g.gw) | 0) + 0.5) * cs;
     const live = [];
     for (const i of rec.members) if (marching(A, i, rec)) live.push(i);
-    const slots = formation(w, best, live.length, 0), cells = new Set();
-    live.forEach((i, k) => { A.home[2 * i] = slots[2 * k]; A.home[2 * i + 1] = slots[2 * k + 1]; cells.add(w.cellAt(slots[2 * k], slots[2 * k + 1])); });
+    const slots = formation(w, best, live.length, 0), cells = new Set(), st = slots.tiers || null;
+    if (st) rec.tier = tierOf(g.deck, best);
+    live.forEach((i, k) => {
+      A.home[2 * i] = slots[2 * k]; A.home[2 * i + 1] = slots[2 * k + 1];
+      if (st) { rec.ht.set(i, st[k]); cells.add(fieldAtT(w, slots[2 * k], slots[2 * k + 1], st[k])); } else cells.add(w.cellAt(slots[2 * k], slots[2 * k + 1]));
+    });
     rec.slotCells = Int32Array.from([...cells].filter((c) => c >= 0).sort((a, z) => a - z));
     startBuild(w, rec, 'dest', true);
     return;
@@ -387,7 +449,7 @@ function finishBuild(w, rec, b) {
     if (!marching(A, i, rec)) continue;
     live++;
     const l = memberCell(w, F, i);
-    if (l >= 0) { reached++; if (F.dist[l] > far) far = F.dist[l]; } else if (!b.wide && !boxedIn(w, w.cellAt(A.x[i], A.y[i]))) open++;
+    if (l >= 0) { reached++; if (F.dist[l] > far) far = F.dist[l]; } else if (!b.wide && ((w.grid.deck && A.tier[i] !== 0) || !boxedIn(w, w.cellAt(A.x[i], A.y[i])))) open++;
   }
   if (!live) { releaseRec(w, rec); return; }
   if ((open || !reached) && !b.wide) { startBuild(w, rec, 'dest', true); return; }
@@ -455,6 +517,8 @@ function fieldStale(w, F) {
     const row = (y + F.oy) * gw + F.ox, lr = y * F.lw;
     for (let x = 1; x < F.lw - 1; x++) if (src[row + x] !== cost[lr + x]) return true;
   }
+  const wg = F.wg, LN = F.lw * F.lh;
+  if (wg) for (let j = 0; j < wg.D; j++) if (src[wg.gid[j]] !== cost[LN + j]) return true;
   return false;
 }
 
@@ -473,31 +537,46 @@ function ordersSystem(w) {
   }
 }
 
-// Points from (x, y) down the squad's field to its destination: [x0, y0, x1, y1, ...] (for the map line).
-export function marchPath(w, rec, x, y, maxSteps = 1500) {
-  const F = rec && rec.field, g = w.grid, cs = g.cell, out = [x, y];
-  if (!F) { out.push(rec.dx, rec.dy); return out; }
-  let cx = Math.floor(x / cs) - F.ox, cy = Math.floor(y / cs) - F.oy;
-  if (cx < 1 || cy < 1 || cx >= F.lw - 1 || cy >= F.lh - 1) { out.push(rec.dx, rec.dy); return out; }
-  let l = cy * F.lw + cx, last = -1;
+// Points from (x, y) on tier `tier` down the squad's field to its destination: [x0, y0, x1, y1, ...] (for the map
+// line); out.tiers has the tier of each point on maps with decks.
+export function marchPath(w, rec, x, y, maxSteps = 1500, tier = 0) {
+  const F = rec && rec.field, g = w.grid, cs = g.cell, out = [x, y], wg = F ? F.wg : null, LN = F ? F.lw * F.lh : 0;
+  const tiers = out.tiers = g.deck ? [tier] : null;
+  const end = () => { out.push(rec.dx, rec.dy); if (tiers) tiers.push(rec.tier | 0); return out; };
+  if (!F) return end();
+  let cx = Math.floor(x / cs) - F.ox, cy = Math.floor(y / cs) - F.oy, l;
+  if (tier !== 0 && g.deck) {
+    const f = nodeAt(g.deck, tier, cx + F.ox, cy + F.oy);
+    l = f < 0 || !wg ? -1 : localOf(wg, f, g.deck.N, g.gw, F.ox, F.oy, F.lw, F.lh);
+  } else l = cx < 1 || cy < 1 || cx >= F.lw - 1 || cy >= F.lh - 1 ? -1 : cy * F.lw + cx;
+  if (l < 0) return end();
+  let last = -1;
+  const at = () => { if (l >= LN) { const c = wg.cell[l - LN]; cx = c % F.lw; cy = (c / F.lw) | 0; } else { cx = l % F.lw; cy = (l / F.lw) | 0; } };
+  const put = () => { out.push((cx + F.ox + 0.5) * cs, (cy + F.oy + 0.5) * cs); if (tiers) tiers.push(l >= LN ? wg.tier[l - LN] : 0); };
+  at();
   for (let s = 0; s < maxSteps; s++) {
     const d = F.dir[l];
     if (d >= 8) break;
-    if (d !== last && s) out.push((cx + F.ox + 0.5) * cs, (cy + F.oy + 0.5) * cs);
-    last = d; cx += DX[d]; cy += DY[d]; l = cy * F.lw + cx;
+    if (d !== last && s) put();
+    last = d;
+    const n = wg ? stepField(wg, l, DX[d], DY[d]) : l + DX[d] + DY[d] * F.lw;
+    if (n < 0) break;
+    l = n; at();
   }
-  out.push((cx + F.ox + 0.5) * cs, (cy + F.oy + 0.5) * cs, rec.dx, rec.dy);
-  return out;
+  put();
+  return end();
 }
 
 // Squad group and vehicle ids stay out: their counters are not reset by a retry, so a replay would hash differently.
 function hashOrders(w, mix) {
   for (const r of w.orders.recs.values()) {
     mix(r.id); mix(KIND_CODE[r.kind]); mix(Math.round(r.dx * 4)); mix(Math.round(r.dy * 4)); mix(r.field ? 1 : 0); mix(r.members.length); mix(r.med);
+    if (r.ht) mix(r.tier);
   }
   for (const v of w.vehicles) {
     const o = v && v.alive !== false && v.order;
     if (!o) continue;
     mix(KIND_CODE[o.kind] || 0); mix(Number.isFinite(o.x) ? Math.round(o.x * 4) : -1); mix(Number.isFinite(o.y) ? Math.round(o.y * 4) : -1);
+    if (o.tier !== undefined) mix(o.tier);
   }
 }

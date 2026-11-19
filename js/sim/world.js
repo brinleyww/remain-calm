@@ -131,10 +131,11 @@ export class World {
   addKill(srcKey = 'unknown', n = 1) { this.stats.killed += n; this.stats.killsBy[srcKey] = (this.stats.killsBy[srcKey] || 0) + n; }
 
   // Rescue pickups (bus, medevac): civilians path to them like to a gate. r = pickup radius in meters.
-  addPickup(id, x, y, r = 12) {
+  // tier: the level the pickup is on (maps with decks)
+  addPickup(id, x, y, r = 12, tier = 0) {
     let p = this.pickups.find((q) => q.id === id);
-    if (!p) { p = { id, x, y, r, fx: NaN, fy: NaN }; this.pickups.push(p); this.nav.civ.dirty = true; }
-    p.x = x; p.y = y; p.r = r;
+    if (!p) { p = { id, x, y, r, fx: NaN, fy: NaN, tier }; this.pickups.push(p); this.nav.civ.dirty = true; }
+    p.x = x; p.y = y; p.r = r; p.tier = tier;
     return p;
   }
   removePickup(id) {
@@ -308,6 +309,7 @@ export class World {
     for (const v of this.vehicles) {
       if (!v.alive) continue;
       mix(hashStr(String(v.kind))); mix(Math.round(v.x * 10)); mix(Math.round(v.y * 10)); mix(Math.round(v.hp || 0)); mix(v.loaded | 0);
+      if (TR) mix(v.tier | 0);
       if (v.order) { mix(hashStr(String(v.order.kind))); mix(v.order.done ? 1 : 0); }
     }
     if (this.orders) this.orders.hash(mix);

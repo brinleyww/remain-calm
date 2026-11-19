@@ -88,6 +88,9 @@ function resolveTarget(world, id, a, cmd) {
     return { ok: true, cost: 0, x, y, x2, y2 };
   }
   if (NEEDS_GROUND.has(id)) {
+    // on a deck: land on it
+    const g = world.grid;
+    if (g.deck && world.surfaceAt(x, y) > 0) return { ok: true, cost: 0, x: (Math.floor(x / g.cell) + 0.5) * g.cell, y: (Math.floor(y / g.cell) + 0.5) * g.cell };
     const s = landingCell(world, x, y, id === 'medevac' ? 8 : 12);
     if (!s) return fail(id === 'medevac' ? 'No landing zone there' : 'No room to land there');
     return { ok: true, cost: 0, x: s[0], y: s[1] };
@@ -232,9 +235,9 @@ function deliver(world, p) {
       break;
     }
     case 'apc': case 'tank': {
-      const s = landingCell(world, p.x, p.y, 12);
+      const dt = world.surfaceAt(p.x, p.y), s = dt > 0 ? [p.x, p.y] : landingCell(world, p.x, p.y, 12);
       if (!s) { log(world, 'DELIVERY ABORTED: NO ROOM TO LAND', 'warn', p.x, p.y); world.charges[id] = (world.charges[id] | 0) + 1; break; }
-      spawnArmour(world, id, a, s[0], s[1], p.owner);
+      spawnArmour(world, id, a, s[0], s[1], p.owner, dt);
       log(world, id === 'tank' ? 'TANK ON STATION' : 'ARMOURED CARRIER ON STATION', 'info', s[0], s[1]);
       break;
     }

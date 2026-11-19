@@ -4,6 +4,7 @@ import { rasterPoly, rasterSegCover, unionBoundary, polyArea, polyPerimeter, poi
 import { updatePassCells, touchNav, buildCorridorField, corridorContains, corridorBBox, isWalkTerrain } from './nav.js';
 import { canAfford, spend, refundPlacement } from './economy.js';
 import { refreshFunctions } from './structures.js';
+import { TIERS, nodeAt, stepField } from './decks.js';
 
 export function initZones(world) {
   const N = world.grid.gw * world.grid.gh;
@@ -179,6 +180,7 @@ function gateGeom(world, e) {
 // Does a gate with these cells join walkable ground inside the zone to open ground outside? A BFS of about 150 cells.
 const OPEN_MIN = 150;
 export function gateOpening(world, comp, cells) {
+  if (world.grid.deck) return gateOpeningT(world, comp, cells);
   const g = world.grid, gw = g.gw, terr = g.terrain, mask = world.region.mask, id1 = comp + 1;
   const walk = (c) => mask[c] === 1 && isWalkTerrain(terr[c]);
   const free = (c) => walk(c) && !world.zoneComp[c] && !(world.block[c] && world.wallHp[c] > 0);
@@ -212,6 +214,54 @@ export function gateOpening(world, comp, cells) {
   const outside = h >= OPEN_MIN;
   return { ok: outside, inside: true, outside, width: gate.size, approach, narrow: outside && narrow,
     reason: !outside ? 'The gate opens onto a closed yard' : narrow ? 'Most of the gate faces a building' : '' };
+}
+
+// gateOpening on a map with decks: the gate blocks every tier of its cells, so each tier it crosses is checked (the
+// flood follows deck links and ramps) and the one that opens best is the answer.
+const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+function gateOpeningT(world, comp, cells) {
+  const g = world.grid, dk = g.deck, N = dk.N, terr = g.terrain, mask = world.region.mask, id1 = comp + 1, br = world.bridges;
+  const gr = (f) => (f < N ? f : dk.cell[f - N]);
+  const walk = (f) => {
+    if (f < 0) return false;
+    if (f < N) return mask[f] === 1 && isWalkTerrain(terr[f]);
+    const sid = dk.sid[f - N];
+    return mask[dk.cell[f - N]] === 1 && !(sid >= 0 && br && br[sid] && br[sid].alive === false);
+  };
+  const free = (f) => { const c = gr(f); return walk(f) && !world.zoneComp[c] && !(world.block[c] && world.wallHp[c] > 0); };
+  const NN = N + dk.D;
+  if (!world._gateMark || world._gateMark.length !== NN) { world._gateMark = new Uint32Array(NN); world._gateGen = 0; }
+  const mark = world._gateMark, near = (f, out) => { out.length = 0; for (const [dx, dy] of SIDES) { const n = stepField(dk, f, dx, dy); if (n >= 0) out.push(n); } return out; };
+  const nb = [], nb2 = [];
+  let best = null, bs = -1;
+  for (const t of [0, ...TIERS]) {
+    const gen = ++world._gateGen, gate = new Set();
+    for (const c of cells) { const f = t === 0 ? c : nodeAt(dk, t, c % g.gw, (c / g.gw) | 0); if (walk(f)) gate.add(f); }
+    if (!gate.size) { if (t === 0) { best = { ok: false, inside: false, outside: false, reason: 'The gate opens into a building' }; bs = 0; } continue; }
+    let o = null;
+    const q = [];
+    for (const f of gate) for (const n of near(f, nb)) if (world.zoneId[gr(n)] === id1 && walk(n)) { mark[f] = gen; q.push(f); break; }
+    if (!q.length) o = { ok: false, inside: false, outside: false, reason: 'Buildings block the gate on the inside' };
+    const seeds = [];
+    for (let h = 0; !o && h < q.length; h++) {
+      for (const n of near(q[h], nb)) {
+        if (mark[n] === gen) continue;
+        if (gate.has(n)) { mark[n] = gen; q.push(n); } else if (free(n)) { mark[n] = gen; seeds.push(n); }
+      }
+    }
+    if (!o && !seeds.length) o = { ok: false, inside: true, outside: false, reason: 'The gate opens onto a building' };
+    if (!o) {
+      const approach = seeds.length, narrow = approach * g.cell < world.cfg.gate.width * 0.5;
+      let h = 0;
+      for (; h < seeds.length && h < OPEN_MIN; h++) for (const m of near(seeds[h], nb2)) if (mark[m] !== gen && free(m)) { mark[m] = gen; seeds.push(m); }
+      const outside = h >= OPEN_MIN;
+      o = { ok: outside, inside: true, outside, width: gate.size, approach, narrow: outside && narrow,
+        reason: !outside ? 'The gate opens onto a closed yard' : narrow ? 'Most of the gate faces a building' : '' };
+    }
+    const sc = o.ok ? 2 + (o.narrow ? 0 : 1e6) + o.approach * 1000 + o.width : o.inside ? 1 : 0;
+    if (sc > bs) { best = o; bs = sc; }
+  }
+  return best;
 }
 
 // Where a gate clicked at (x,y) goes: the nearest spot on the true wall within 12 m; when that spot opens onto

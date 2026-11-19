@@ -10,7 +10,7 @@ import {
   buildingAt, destroyUnit, detonate, onCollapse, onBridgeDown, placedReadyAt, kindOf,
 } from './combat.js';
 import { registerAbilityCommands, abilitySystem, resetAbilities, abilityState, ABILITY_INFO, squadMembers } from './abilities.js';
-import { vehicleSystem, findPath, VEHICLE_NAMES } from './vehicles.js';
+import { vehicleSystem, findPath, VEHICLE_NAMES, destroyVehicle } from './vehicles.js';
 import { installNaval, canPlaceBoat, unitBlocked, boatStatus, ferryDest, waterOf } from './naval.js';
 
 export { unitStats, unitRange, abilityState, ABILITY_INFO, squadMembers, findPath, VEHICLE_NAMES, unitBlocked, boatStatus, ferryDest, waterOf };
@@ -442,6 +442,7 @@ export function installCombat(world) {
   if (world.combat) return world;
   const C = world.combat = makeCombatState();
   C.names = Object.fromEntries(Object.entries(UNIT_INFO).map(([k, v]) => [k, v.name]));
+  C.dropVehicle = (v) => destroyVehicle(world, v);
   if (typeof world.isUnlocked !== 'function') world.isUnlocked = () => true;
   world.squads = C.squads;
   world.strikes = C.pending;

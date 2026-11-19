@@ -2,10 +2,13 @@
 // plus the player's boats (js/sim/naval.js). Ground vehicles drive on civilian-passable cells with a windowed A*,
 // boats on their own water, aircraft fly straight over everything.
 // Commandable vehicles (boats, armour) follow v.order = { kind: 'move'|'hunt'|'hold'|'return', x, y, t, done } when set.
+// On maps with decks ground vehicles drive over decks and through tunnels (A* over decks.js windowGraph): v.tier follows
+// the path, and crushing, scratches and boarding only reach people on that tier.
 import { T } from '../map/format.js';
 import { clamp } from '../util/geom.js';
 import { ZOMBIE, ZSUB, M_ZOMBIE, M_CIV } from './agents.js';
 import { P_CIV, P_SLOW, nearestPassable, updatePassCells } from './nav.js';
+import { windowGraph, localOf, nodeAt, nearestOnTier, portalOf, LV_PORTAL } from './decks.js';
 import { abilityKey, nearestZombie, zombiesNear, pickDirect, pickArty, addClaim, queueShell, destroyUnit, sound, log } from './combat.js';
 import { updateBoat } from './naval.js';
 
@@ -76,11 +79,15 @@ function nearestIn(pass, g, x, y, bits, maxR) {
 
 // Path of fine cells from (sx,sy) toward (tx,ty) over cells with `bits`. If the goal cannot be reached inside the search
 // window/budget, returns the path to the explored cell closest to it. null when the start is boxed in.
-// opt: { pass (custom passability array, default world.nav.pass), margin (window margin in cells), maxWin (cells) }.
+// opt: { pass (custom passability array, default world.nav.pass), margin (window margin in cells), maxWin (cells),
+// tier / goalTier (maps with decks: the start and goal tiers; the path is then of field ids, nodes included) }.
 export function findPath(world, sx, sy, tx, ty, bits = P_CIV, maxExp = 40000, opt = null) {
   const g = world.grid, gw = g.gw, gh = g.gh, cs = g.cell, own = opt && opt.pass, pass = own || world.nav.pass;
+  const layered = !!g.deck && !own && opt !== null;
   let s = world.cellAt(sx, sy);
+  if (layered && opt.tier) { const f = s < 0 ? -1 : nodeAt(g.deck, opt.tier, s % gw, (s / gw) | 0); if (f >= 0 && (pass[f] & bits)) s = f; }
   if (s < 0 || !(pass[s] & bits)) { s = own ? nearestIn(pass, g, sx, sy, bits, 4) : nearestPassable(world, sx, sy, bits, 4); if (s < 0) return null; }
+  if (s >= g.gw * g.gh) return findPathT(world, s, tx, ty, bits, maxExp, opt);
   const scx = s % gw, scy = (s / gw) | 0;
   let tcx = clamp(Math.floor(tx / cs), 1, gw - 2), tcy = clamp(Math.floor(ty / cs), 1, gh - 2);
   const M = (opt && opt.margin) || 40, MW = (opt && opt.maxWin) || MAX_WIN;
@@ -90,6 +97,7 @@ export function findPath(world, sx, sy, tx, ty, bits = P_CIV, maxExp = 40000, op
   if (ey - oy > MW) { if (tcy > scy) { oy = Math.max(1, scy - M); ey = Math.min(gh - 2, oy + MW); } else { ey = Math.min(gh - 2, scy + M); oy = Math.max(1, ey - MW); } }
   tcx = clamp(tcx, ox, ex); tcy = clamp(tcy, oy, ey);
   const lw = ex - ox + 1, lh = ey - oy + 1;
+  if (layered) { const wg = windowGraph(g.deck, ox - 1, oy - 1, lw + 2, lh + 2); if (wg) return astarT(world, wg, s, tcx, tcy, opt.goalTier | 0, bits, maxExp); }
   pfEnsure(lw * lh);
   if (++PF.gen > 0xFFFFFFF0) { PF.open.fill(0); PF.closed.fill(0); PF.gen = 1; }
   const gen = PF.gen, G = PF.g, OP = PF.open, CL = PF.closed, PR = PF.prev;
@@ -133,6 +141,84 @@ export function findPath(world, sx, sy, tx, ty, bits = P_CIV, maxExp = 40000, op
   return Int32Array.from(out);
 }
 
+// findPath from a deck or tunnel node s: the same window around it and the goal.
+function findPathT(world, s, tx, ty, bits, maxExp, opt) {
+  const g = world.grid, gw = g.gw, gh = g.gh, cs = g.cell, sc = g.deck.cell[s - g.gw * g.gh], scx = sc % gw, scy = (sc / gw) | 0;
+  let tcx = clamp(Math.floor(tx / cs), 1, gw - 2), tcy = clamp(Math.floor(ty / cs), 1, gh - 2);
+  const M = opt.margin || 40, MW = opt.maxWin || MAX_WIN;
+  let ox = Math.max(1, Math.min(scx, tcx) - M), oy = Math.max(1, Math.min(scy, tcy) - M);
+  let ex = Math.min(gw - 2, Math.max(scx, tcx) + M), ey = Math.min(gh - 2, Math.max(scy, tcy) + M);
+  if (ex - ox > MW) { if (tcx > scx) { ox = Math.max(1, scx - M); ex = Math.min(gw - 2, ox + MW); } else { ex = Math.min(gw - 2, scx + M); ox = Math.max(1, ex - MW); } }
+  if (ey - oy > MW) { if (tcy > scy) { oy = Math.max(1, scy - M); ey = Math.min(gh - 2, oy + MW); } else { ey = Math.min(gh - 2, scy + M); oy = Math.max(1, ey - MW); } }
+  tcx = clamp(tcx, ox, ex); tcy = clamp(tcy, oy, ey);
+  const wg = windowGraph(g.deck, ox - 1, oy - 1, ex - ox + 3, ey - oy + 3);
+  return wg ? astarT(world, wg, s, tcx, tcy, opt.goalTier | 0, bits, maxExp) : null;
+}
+
+// A* over a window graph (its ground cells and nodes): the layered twin of the loop in findPath. Returns field ids.
+function astarT(world, wg, s, tcx, tcy, gt, bits, maxExp) {
+  const g = world.grid, gw = g.gw, N = g.gw * g.gh, pass = world.nav.pass, lw = wg.gw, lh = wg.gh, LN = wg.N, ox = wg.ox, oy = wg.oy;
+  pfEnsure(LN + wg.D);
+  if (++PF.gen > 0xFFFFFFF0) { PF.open.fill(0); PF.closed.fill(0); PF.gen = 1; }
+  const gen = PF.gen, G = PF.g, OP = PF.open, CL = PF.closed, PR = PF.prev, nb = wg.nb, gid = wg.gid, wc = wg.cell;
+  const H = (lx, ly) => { const dx = Math.abs(lx + ox - tcx), dy = Math.abs(ly + oy - tcy); return (dx > dy ? dx + 0.4142 * dy : dy + 0.4142 * dx); };
+  const glob = (l) => (l < LN ? ((l / lw) | 0) * gw + (l % lw) + oy * gw + ox : gid[l - LN]);
+  const l0 = localOf(wg, s, N, gw, ox, oy, lw, lh);
+  let lt = gt ? localOf(wg, nodeAt(g.deck, gt, tcx, tcy), N, gw, ox, oy, lw, lh) : -1;
+  if (lt < 0) lt = (tcy - oy) * lw + (tcx - ox);
+  if (l0 < 0) return null;
+  PF.hs = 0;
+  G[l0] = 0; OP[l0] = gen; PR[l0] = -1;
+  const xy = (l) => (l < LN ? l : wc[l - LN]);
+  let best = l0, bestH = H(xy(l0) % lw, (xy(l0) / lw) | 0);
+  hpush(l0, bestH);
+  let exp = 0;
+  const relax = (l, nl, step) => {
+    if (CL[nl] === gen) return;
+    const ng = G[l] + step;
+    if (OP[nl] === gen && G[nl] <= ng) return;
+    OP[nl] = gen; G[nl] = ng; PR[nl] = l;
+    const q = xy(nl);
+    hpush(nl, ng + H(q % lw, (q / lw) | 0));
+  };
+  while (PF.hs > 0 && exp < maxExp) {
+    const l = hpop();
+    if (CL[l] === gen) continue;
+    CL[l] = gen; exp++;
+    if (l === lt) { best = l; break; }
+    const q = xy(l), lx = q % lw, ly = (q / lw) | 0;
+    const h = H(lx, ly);
+    if (h < bestH) { bestH = h; best = l; }
+    if (l >= LN) {
+      const b = 8 * (l - LN);
+      for (let d = 0; d < 8; d++) {
+        const nl = nb[b + d];
+        if (nl < 0 || !(pass[glob(nl)] & bits)) continue;
+        if (d & 1) { const a = nb[b + d - 1], c = nb[b + ((d + 1) & 7)]; if (a < 0 || c < 0 || !(pass[glob(a)] & bits) || !(pass[glob(c)] & bits)) continue; }
+        relax(l, nl, (d & 1 ? 1.4142 : 1) * (nl < LN && pass[glob(nl)] & P_SLOW ? 2 : 1));
+      }
+      continue;
+    }
+    const gc = (ly + oy) * gw + lx + ox, portal = (wg.lvf[l] & LV_PORTAL) !== 0;
+    for (let d = 0; d < 8; d++) {
+      const dx = d === 0 || d === 1 || d === 7 ? 1 : d === 3 || d === 4 || d === 5 ? -1 : 0;
+      const dy = d === 1 || d === 2 || d === 3 ? 1 : d === 5 || d === 6 || d === 7 ? -1 : 0;
+      if (portal && !(d & 1)) { const pn = portalOf(wg, l, d); if (pn >= 0) { if (pass[gid[pn - LN]] & bits) relax(l, pn, 1); continue; } }
+      const nx = lx + dx, ny = ly + dy;
+      if (nx < 1 || ny < 1 || nx >= lw - 1 || ny >= lh - 1) continue;
+      const nc = gc + dy * gw + dx;
+      if (!(pass[nc] & bits)) continue;
+      if (dx && dy && (!(pass[gc + dx] & bits) || !(pass[gc + dy * gw] & bits))) continue;
+      relax(l, ny * lw + nx, (dx && dy ? 1.4142 : 1) * (pass[nc] & P_SLOW ? 2 : 1));
+    }
+  }
+  if (best === l0) return new Int32Array(0);
+  const out = [];
+  for (let l = best; l !== l0 && l >= 0; l = PR[l]) out.push(glob(l));
+  out.reverse();
+  return Int32Array.from(out);
+}
+
 // Nearest point on the map edge, pushed `out` meters past it (negative = inside).
 export function edgePoint(world, x, y, out = 0) {
   const W = world.map.w, Hh = world.map.h;
@@ -150,7 +236,7 @@ export function addVehicle(world, kind, x, y, props = {}) {
   const C = world.combat;
   const v = {
     id: props.id ?? C.nextVeh++, kind, x, y, heading: 0, hp: 0, hpMax: 0, alive: true, owner: 0, state: 'active', t0: world.t,
-    tgt: -1, scanT: 0, cd: 0, path: null, pi: 0, goalX: NaN, goalY: NaN, replanAt: 0, kills: 0, offmap: false,
+    tgt: -1, scanT: 0, cd: 0, path: null, pi: 0, goalX: NaN, goalY: NaN, replanAt: 0, kills: 0, offmap: false, tier: 0,
     ...props,
   };
   if (v.hpMax && !v.hp) v.hp = v.hpMax;
@@ -177,20 +263,22 @@ export function destroyVehicle(world, v, quiet = false) {
 }
 
 // ---------------------------------------------------------------- movement
-function drive(world, v, tx, ty, spd, dt) {
-  if (!v.path || world.t >= v.replanAt || Math.hypot(tx - v.goalX, ty - v.goalY) > 10) {
-    v.path = findPath(world, v.x, v.y, tx, ty, P_CIV, 30000);
-    v.pi = 0; v.goalX = tx; v.goalY = ty; v.replanAt = world.t + 2;
+// gt: the goal's tier (maps with decks)
+function drive(world, v, tx, ty, spd, dt, gt = 0) {
+  const g = world.grid, cs = g.cell, dk = g.deck, N = g.gw * g.gh;
+  if (!v.path || world.t >= v.replanAt || Math.hypot(tx - v.goalX, ty - v.goalY) > 10 || (v.goalT | 0) !== gt) {
+    v.path = findPath(world, v.x, v.y, tx, ty, P_CIV, 30000, dk ? { tier: v.tier | 0, goalTier: gt } : null);
+    v.pi = 0; v.goalX = tx; v.goalY = ty; v.goalT = gt; v.replanAt = world.t + 2;
   }
-  const path = v.path, g = world.grid, cs = g.cell;
+  const path = v.path;
   if (!path || v.pi >= path.length) return Math.hypot(tx - v.x, ty - v.y) < 5 ? 'arrived' : 'stuck';
   const c0 = world.cellAt(v.x, v.y);
-  let budget = spd * dt * (c0 >= 0 && world.nav.pass[c0] & P_SLOW ? 0.5 : 1);
+  let budget = spd * dt * (c0 >= 0 && (dk === null || !v.tier) && world.nav.pass[c0] & P_SLOW ? 0.5 : 1);
   while (budget > 1e-6 && v.pi < path.length) {
-    const c = path[v.pi], wx = (c % g.gw + 0.5) * cs, wy = (((c / g.gw) | 0) + 0.5) * cs;
+    const f = path[v.pi], c = f < N ? f : dk.cell[f - N], wx = (c % g.gw + 0.5) * cs, wy = (((c / g.gw) | 0) + 0.5) * cs;
     const dx = wx - v.x, dy = wy - v.y, d = Math.hypot(dx, dy);
     if (d > 1e-3) v.heading = Math.atan2(dy, dx);
-    if (d <= budget) { v.x = wx; v.y = wy; budget -= d; v.pi++; }
+    if (d <= budget) { v.x = wx; v.y = wy; budget -= d; v.pi++; if (dk !== null) v.tier = f < N ? 0 : dk.tier[f - N]; }
     else { v.x += dx / d * budget; v.y += dy / d * budget; budget = 0; }
   }
   if (v.pi >= path.length) return Math.hypot(tx - v.x, ty - v.y) < 5 ? 'arrived' : 'end';
@@ -207,18 +295,18 @@ function fly(v, tx, ty, spd, dt) {
 
 // ---------------------------------------------------------------- shared actions
 function crush(world, v, r, dmg, key) {
-  if (!zombiesNear(world, v.x, v.y, r)) return;
+  if (!(v.tier < 0) && !zombiesNear(world, v.x, v.y, r)) return;
   const hits = [];
-  world.query(v.x, v.y, r, M_ZOMBIE, (i) => { hits.push(i); }, 0);
+  world.query(v.x, v.y, r, M_ZOMBIE, (i) => { hits.push(i); }, v.tier | 0);
   for (const i of hits) if (world.A.type[i] === ZOMBIE && world.damageAgent(i, dmg, key)) v.kills++;
 }
 
 function scratched(world, v, dt) {
-  if (!zombiesNear(world, v.x, v.y, VEH_R + 3)) return;
+  if (!(v.tier < 0) && !zombiesNear(world, v.x, v.y, VEH_R + 3)) return;
   const A = world.A, zc = world.cfg.zombie;
   const giantMul = (world.cfg.mutation.kinds.giant && world.cfg.mutation.kinds.giant.wallDpsMul) || 1;
   let n = 0;
-  world.query(v.x, v.y, zc.touchRadius + VEH_R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; }, 0);
+  world.query(v.x, v.y, zc.touchRadius + VEH_R, M_ZOMBIE, (i) => { if (A.stun[i] <= 0) n += A.sub[i] === ZSUB.GIANT ? giantMul : 1; }, v.tier | 0);
   if (!n) return;
   v.hp -= zc.wallDps * dt * n;
   if (v.hp <= 0) destroyVehicle(world, v);
@@ -237,7 +325,7 @@ export function gunTarget(world, v, slot, r, shot) {
   const A = world.A;
   let t = v[slot];
   if (t >= 0 && A.type[t] === ZOMBIE) { const dx = A.x[t] - v.x, dy = A.y[t] - v.y; if (dx * dx + dy * dy <= r * r) return t; }
-  t = zombiesNear(world, v.x, v.y, r) ? pickDirect(world, v.x, v.y, r, shot) : -1;
+  t = v.tier < 0 ? world.nearest(v.x, v.y, r, M_ZOMBIE, v.tier) : zombiesNear(world, v.x, v.y, r) ? pickDirect(world, v.x, v.y, r, shot) : -1;
   v[slot] = t;
   return t;
 }
@@ -262,7 +350,7 @@ export function loadCivs(world, v, a, dt) {
   v.acc = Math.min((v.acc || 0) + a.loadPerSec * dt, 3);
   let got = false;
   while (v.acc >= 1 && v.loaded < a.capacity) {
-    const i = world.nearest(v.x, v.y, a.loadRadius, M_CIV, 0);
+    const i = world.nearest(v.x, v.y, a.loadRadius, M_CIV, v.tier | 0);
     if (i < 0) break;
     if (!world.evacuate(i)) break;
     v.loaded++; v.acc -= 1; v.lastLoad = world.t; got = true;
@@ -296,6 +384,11 @@ function armourOrder(v) {
   return o && ORDER_KINDS.has(o.kind) && !(o.kind === 'return' && o.done) ? o : null;
 }
 
+// Nearest zombie for a vehicle: anyone above ground, or along its own tunnel.
+function vehZombie(world, v, x, y, r) {
+  return v.tier < 0 ? (world.counts[ZOMBIE] > 0 ? world.nearest(x, y, r, M_ZOMBIE, v.tier) : -1) : nearestZombie(world, x, y, r);
+}
+
 function updateArmour(world, v, dt) {
   const a = v.cfg, A = world.A, tank = v.kind === 'tank', key = v.key;
   if (tank) v.cd -= dt;
@@ -304,10 +397,10 @@ function updateArmour(world, v, dt) {
   if (world.t >= v.scanT) {
     v.scanT = world.t + 0.4;
     let t;
-    if (o) t = nearestZombie(world, v.x, v.y, o.kind === 'hunt' ? 600 : a.range);
+    if (o) t = vehZombie(world, v, v.x, v.y, o.kind === 'hunt' ? 600 : a.range);
     else {
-      t = nearestZombie(world, v.x, v.y, Math.max(a.range * 1.6, 150));
-      if (t < 0 || Math.hypot(A.x[t] - v.hx, A.y[t] - v.hy) > leash) t = nearestZombie(world, v.hx, v.hy, leash);
+      t = vehZombie(world, v, v.x, v.y, Math.max(a.range * 1.6, 150));
+      if (t < 0 || Math.hypot(A.x[t] - v.hx, A.y[t] - v.hy) > leash) t = vehZombie(world, v, v.hx, v.hy, leash);
     }
     v.tgt = t;
   }
@@ -315,19 +408,19 @@ function updateArmour(world, v, dt) {
   if (t >= 0 && A.type[t] !== ZOMBIE) { t = v.tgt = -1; v.scanT = 0; }
   if (o) {
     if (o.kind === 'move' && !o.done) {
-      if (v._oRef !== o) { v._oRef = o; v._og = Number.isFinite(+o.x) && Number.isFinite(+o.y) ? landingCell(world, +o.x, +o.y, 20) || [+o.x, +o.y] : null; }
-      if (!v._og || drive(world, v, v._og[0], v._og[1], a.speed, dt) !== 'moving') o.done = true;
+      if (v._oRef !== o) { v._oRef = o; v._og = Number.isFinite(+o.x) && Number.isFinite(+o.y) ? goalOn(world, +o.x, +o.y, o.tier | 0) : null; }
+      if (!v._og || drive(world, v, v._og[0], v._og[1], a.speed, dt, v._og[2]) !== 'moving') o.done = true;
     } else if (o.kind === 'return') {
-      if (drive(world, v, v.hx, v.hy, a.speed, dt) !== 'moving') o.done = true;
+      if (drive(world, v, v.hx, v.hy, a.speed, dt, v.ht | 0) !== 'moving') o.done = true;
     } else if (o.kind === 'hunt') {
-      if (t >= 0 && Math.hypot(A.x[t] - v.x, A.y[t] - v.y) > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt);
+      if (t >= 0 && Math.hypot(A.x[t] - v.x, A.y[t] - v.y) > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt, A.tier[t]);
     } else if (o.kind === 'hold') o.done = true;
   } else if (t >= 0) {
     d = Math.hypot(A.x[t] - v.x, A.y[t] - v.y);
-    if (d > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt);
-  } else if (Math.hypot(v.hx - v.x, v.hy - v.y) > 6) drive(world, v, v.hx, v.hy, a.speed, dt);
+    if (d > a.range * 0.75) drive(world, v, A.x[t], A.y[t], a.speed, dt, A.tier[t]);
+  } else if (Math.hypot(v.hx - v.x, v.hy - v.y) > 6) drive(world, v, v.hx, v.hy, a.speed, dt, v.ht | 0);
   if (tank) {
-    if (t >= 0 && v.cd <= 0) {
+    if (t >= 0 && v.cd <= 0 && !(v.tier < 0)) {
       const aim = shellAim(world, v, v.x, v.y, (a.splash || 10) + 4, a.range, a.splash || 10, a.dmg, 260);
       if (aim) {
         cannon(world, v, aim[0], aim[1], a.dmg, a.splash || 10, 260, key);
@@ -513,26 +606,28 @@ export function vehicleSystem(world, dt) {
 }
 
 // Spawners used by abilities. (x, y) is already a valid target.
-export function spawnArmour(world, kind, a, x, y, owner) {
+export function spawnArmour(world, kind, a, x, y, owner, tier = 0) {
   const v = addVehicle(world, kind, x, y, { cfg: a, hpMax: a.hp, owner, hx: x, hy: y, key: abilityKey(kind), mgCd: 0,
-    commandable: true, selR: kind === 'tank' ? 7 : 6, label: VEHICLE_NAMES[kind] || kind });
+    commandable: true, selR: kind === 'tank' ? 7 : 6, label: VEHICLE_NAMES[kind] || kind, tier, ht: tier });
   world.effects.push({ kind: 'drop', x, y, r: 10, t0: world.t, dur: 1 });
   return v;
 }
 
 export function spawnBus(world, a, x, y, owner) {
-  const v = addVehicle(world, 'bus', x, y, { cfg: a, hpMax: a.hp, owner, state: 'load', loaded: 0, acc: 0, lastLoad: world.t, key: abilityKey('bus') });
+  const tier = world.surfaceAt(x, y);
+  const v = addVehicle(world, 'bus', x, y, { cfg: a, hpMax: a.hp, owner, state: 'load', loaded: 0, acc: 0, lastLoad: world.t, key: abilityKey('bus'), tier });
   v.pickup = 'bus' + v.id;
-  world.addPickup(v.pickup, x, y, Math.min(a.loadRadius * 0.6, 15));
+  world.addPickup(v.pickup, x, y, Math.min(a.loadRadius * 0.6, 15), tier);
   return v;
 }
 
 export function spawnMedevac(world, a, x, y, owner) {
   const [sx, sy] = edgePoint(world, x, y, 80);
-  const v = addVehicle(world, 'medevac', sx, sy, { cfg: a, owner, state: 'inbound', lx: x, ly: y, loaded: 0, acc: 0, lastLoad: world.t, key: abilityKey('medevac') });
+  const tier = world.surfaceAt(x, y);
+  const v = addVehicle(world, 'medevac', sx, sy, { cfg: a, owner, state: 'inbound', lx: x, ly: y, loaded: 0, acc: 0, lastLoad: world.t, key: abilityKey('medevac'), tier });
   v.heading = Math.atan2(y - sy, x - sx);
   v.pickup = 'medevac' + v.id;
-  world.addPickup(v.pickup, x, y, Math.min(a.loadRadius * 0.6, 15));
+  world.addPickup(v.pickup, x, y, Math.min(a.loadRadius * 0.6, 15), tier);
   return v;
 }
 
@@ -566,6 +661,14 @@ export function spawnGunship(world, a, x, y, owner) {
     cfg: a, owner, state: 'inbound', cx: x, cy: y, ang, tspd: Math.max(55, a.delay > 0 ? d / a.delay : 55),
     bigCd: 0, smallCd: 0, until: Infinity, key: abilityKey('gunship'), heading: Math.atan2(iy - ey, ix - ex),
   });
+}
+
+// Where a vehicle ordered to (x, y) on tier t drives to: [x, y, tier] of the nearest open cell on that tier, else on the ground.
+function goalOn(world, x, y, t) {
+  const g = world.grid, f = t ? nearestOnTier(world, x, y, t, P_CIV, 0, 20) : -1;
+  if (f >= 0) { const c = g.deck.cell[f - g.gw * g.gh]; return [(c % g.gw + 0.5) * g.cell, (((c / g.gw) | 0) + 0.5) * g.cell, t]; }
+  const s = landingCell(world, x, y, 20);
+  return s ? [s[0], s[1], 0] : [x, y, 0];
 }
 
 export function landingCell(world, x, y, maxCells = 12) {

@@ -1,14 +1,16 @@
 // Multi-level roads: map format z, the deck grid, fields over decks and tunnels, a leak suite across tiers,
-// agents on decks, blasts, destroyed decks, determinism. Run: node test/decks.mjs  (-v for numbers)
+// agents on decks, blasts, destroyed decks, determinism, orders and vehicles across tiers. Run: node test/decks.mjs  (-v for numbers)
 import { normalizeMap, serializeMap, parseMap, validateMap, clipLineRect, zAt, T } from '../js/map/format.js';
 import { buildGrid } from '../js/sim/raster.js';
-import { nodeAt, portalOf, tierOf, LV_DECK, LV_PORTAL, fieldOf } from '../js/sim/decks.js';
+import { nodeAt, portalOf, tierOf, LV_DECK, LV_PORTAL, LV_SHADOW, fieldOf, stepField } from '../js/sim/decks.js';
 import { World, TYPE, CS, TIER_ALL } from '../js/sim/world.js';
 import { installCombat } from '../js/sim/units.js';
-import { INF } from '../js/sim/nav.js';
+import { INF, P_CIV, DX, DY } from '../js/sim/nav.js';
 import { rectPoly } from '../js/util/geom.js';
 import { rebuildHash } from '../js/sim/agents.js';
 import { assert } from './sim_testmap.mjs';
+import { marchPath } from '../js/sim/orders.js';
+import { findPath } from '../js/sim/vehicles.js';
 import { generateCity } from '../js/map/citygen.js';
 import { encodeShareCode, decodeShareCode } from '../js/util/compress.js';
 
@@ -260,6 +262,187 @@ const RIVER = mk([{ p: [200, 10, 200, 40, 200, 110, 200, 290, 200, 360, 200, 390
   const a = run(), b = run();
   log('determinism', a.hs, 'on deck', a.onDeck);
   assert(a.hs === b.hs && a.restored === b.restored, 'two runs on a deck map give the same hashes, and restore matches');
+}
+
+// ---------------------------------------------------------------- 9. orders and vehicles across tiers
+const UNLOCK = ['abilities.paratroopers.unlock=0', 'abilities.paratroopers.delay=0', 'abilities.apc.unlock=0', 'abilities.apc.delay=0', 'zombie.softlockSec=1e9'];
+const TUN = { p: [10, 200, 60, 200, 130, 200, 270, 200, 340, 200, 390, 200], z: [0, 0, -1, -1, 0, 0], w: 8, k: 'minor' };
+const TUNNEL_MAP = mk([TUN], { buildings: [{ p: rectPoly(100, 120, 300, 280), h: 10, k: 'ind' }] });
+const BLOCKED = mk([{ ...FLY, p: [200, 10, 200, 40, 200, 130, 200, 380], z: [0, 0, 1, 1] }], { buildings: [{ p: rectPoly(120, 100, 280, 395), h: 10, k: 'ind' }] });
+const ordersWorld = (map, setup) => {
+  const w = installCombat(world(map, UNLOCK));
+  w.exec({ t: 'loadout.set', abilities: { paratroopers: 3, apc: 2 } });
+  if (setup) setup(w);
+  battle(w);
+  w.step();
+  return w;
+};
+const dropAt = (w, x, y) => {
+  assert(w.exec({ t: 'ability.use', id: 'paratroopers', x, y }).ok, `paratroopers called at ${x},${y}`);
+  w.step();
+  const g = w.combat.squads[w.combat.squads.length - 1].group, m = [];
+  for (let i = 0; i < w.A.n; i++) if (w.A.type[i] >= TYPE.POLICE && w.A.group[i] === g) { m.push(i); w.A.state[i] = 0; }
+  return { g, m };
+};
+const apcAt = (w, x, y) => {
+  assert(w.exec({ t: 'ability.use', id: 'apc', x, y }).ok, `carrier called at ${x},${y}`);
+  w.step();
+  return w.vehicles.filter((v) => v.kind === 'apc' && v.alive).pop();
+};
+const tiersOf = (w, m) => m.map((i) => w.A.tier[i]).join('');
+{
+  // a squad on the ground walks up the ramp to a point on the deck, and back down to the street under it
+  const w = ordersWorld(mk([FLY, STREET]));
+  const { g, m } = dropAt(w, 100, 100);
+  assert(m.length > 5 && m.every((i) => w.A.tier[i] === 0), `the squad (${m.length}) lands on the ground`);
+  const r = w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 200, y: 200 });
+  const rec = w.orders.byGroup.get(g);
+  assert(r.ok && rec && rec.tier === 1 && rec.field && rec.field.wg, 'a right-click on the deck targets the deck, and the march field covers its nodes');
+  const path = marchPath(w, rec, w.A.x[m[0]], w.A.y[m[0]]);
+  assert(path.tiers[0] === 0 && path.tiers[path.tiers.length - 1] === 1 && path.tiers.includes(1), `the route line climbs onto the deck (${path.tiers.join('')})`);
+  let left = 0;
+  for (let k = 0; k < 2400 && w.orders.byGroup.has(g); k++) { w.step(); for (const i of m) if (w.A.pc[i] < 0 && w.A.tier[i] !== 1 && w.orders.byGroup.has(g)) left++; }
+  const far = Math.max(...m.map((i) => Math.hypot(w.A.x[i] - 200, w.A.y[i] - 200)));
+  log('onto the deck: tiers', tiersOf(w, m), 'farthest', far.toFixed(1), 'left early', left);
+  assert(m.every((i) => w.A.tier[i] === 1) && far < 16 && left === 0, `everyone stands on the deck at the point (farthest ${far.toFixed(1)} m), nobody dropped out`);
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 170, y: 200, low: true }).ok && w.orders.byGroup.get(g).tier === 0, 'Alt / faded decks: the order goes to the ground under the deck');
+  for (let k = 0; k < 2400 && w.orders.byGroup.has(g); k++) w.step();
+  const far2 = Math.max(...m.map((i) => Math.hypot(w.A.x[i] - 170, w.A.y[i] - 200)));
+  assert(m.every((i) => w.A.tier[i] === 0) && far2 < 16, `members already on the deck march down the ramp to the street (farthest ${far2.toFixed(1)} m)`);
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 200, y: 214 }).ok, 'back up onto the deck');
+  for (let k = 0; k < 2400 && w.orders.byGroup.has(g); k++) w.step();
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'hold' }).ok, 'hold on the deck');
+  const p0 = m.map((i) => [w.A.x[i], w.A.y[i]]);
+  for (let k = 0; k < 300; k++) w.step();
+  assert(m.every((i, k) => w.A.tier[i] === 1 && Math.hypot(w.A.x[i] - p0[k][0], w.A.y[i] - p0[k][1]) < 4.5), 'hold: they stay on the deck where they stood');
+}
+{
+  // back to zone from a deck: down the ramp and in through the gate
+  const w = ordersWorld(mk([FLY, STREET]), (ww) => {
+    assert(ww.exec({ t: 'zone.add', p: rectPoly(40, 260, 140, 360) }).ok, 'a zone off to the side');
+    assert(ww.exec({ t: 'gate.add', x: 140, y: 310 }).ok, 'with a gate on its east side');
+  });
+  const { g, m } = dropAt(w, 200, 230);
+  assert(m.filter((i) => w.A.tier[i] === 1).length >= 5, 'most of the squad lands on the deck');
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'return' }).ok && w.orders.byGroup.get(g).zone === 1, 'back to zone from the deck');
+  for (let k = 0; k < 4000 && w.orders.byGroup.has(g); k++) w.step();
+  assert(m.every((i) => w.A.tier[i] === 0 && w.zoneId[w.cellAt(w.A.x[i], w.A.y[i])] === 1), `they came down the ramp and stand inside the zone (${m.filter((i) => w.zoneId[w.cellAt(w.A.x[i], w.A.y[i])] === 1).length}/${m.length})`);
+}
+{
+  // through a tunnel under a building block
+  const w = ordersWorld(TUNNEL_MAP);
+  const { g, m } = dropAt(w, 30, 200);
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 370, y: 200 }).ok, 'order to the far side of the block');
+  let minT = 0;
+  for (let k = 0; k < 3600 && w.orders.byGroup.has(g); k++) { w.step(); for (const i of m) if (w.A.tier[i] < minT) minT = w.A.tier[i]; }
+  const far = Math.max(...m.map((i) => Math.hypot(w.A.x[i] - 370, w.A.y[i] - 200)));
+  assert(minT === -1 && m.every((i) => w.A.tier[i] === 0) && far < 16, `the squad marched through the tunnel and out (farthest ${far.toFixed(1)} m)`);
+  const t1 = ordersWorld(TUNNEL_MAP);
+  const q = dropAt(t1, 30, 200);
+  assert(t1.exec({ t: 'order', refs: ['s' + q.g], kind: 'move', x: 200, y: 200 }).ok && t1.orders.byGroup.get(q.g).tier === -1, 'a click on the block over the tunnel targets the tunnel');
+  for (let k = 0; k < 3600 && t1.orders.byGroup.has(q.g); k++) t1.step();
+  assert(q.m.every((i) => t1.A.tier[i] === -1 && Math.abs(t1.A.x[i] - 200) < 16), 'and they stand in the tunnel there');
+}
+{
+  // leak: a gateless zone over the far end of a deck; nobody gets in, they stop at the nearest reachable spot
+  const w = ordersWorld(BLOCKED, (ww) => assert(ww.exec({ t: 'zone.add', p: rectPoly(150, 260, 250, 390) }).ok, 'zone over the deck end placed'));
+  const { g, m } = dropAt(w, 200, 180);
+  assert(m.every((i) => w.A.tier[i] === 1), 'paratroopers dropped over the deck land on it');
+  assert(w.exec({ t: 'order', refs: ['s' + g], kind: 'move', x: 200, y: 330 }).ok, 'order into the walled end of the deck accepted');
+  let inside = 0;
+  for (let k = 0; k < 2400; k++) { w.step(); for (const i of m) if (w.zoneId[w.cellAt(w.A.x[i], w.A.y[i])]) inside++; }
+  const cy = m.reduce((a, i) => a + w.A.y[i], 0) / m.length;
+  log('walled deck march: inside', inside, 'centroid y', cy.toFixed(1));
+  assert(inside === 0 && cy > 225 && !w.orders.byGroup.has(g), `nobody crossed the wall on the deck; they stopped short of it (y ${cy.toFixed(0)})`);
+}
+{
+  // vehicles: A* over a flyover, an armour order onto a deck, a deck that falls
+  const w = ordersWorld(RIVER);
+  const P = findPath(w, 200, 380, 200, 20, P_CIV, 30000, { tier: 0, goalTier: 0 });
+  assert(P && P.length > 50 && [...P].some((f) => f >= w.grid.gw * w.grid.gh), `findPath over the river runs on the deck (${P && P.length} steps)`);
+  const v = apcAt(w, 200, 380);
+  assert(v && v.tier === 0, 'a carrier on the south bank');
+  assert(w.exec({ t: 'order', refs: ['v' + v.id], kind: 'move', x: 200, y: 20 }).ok, 'carrier ordered across the river');
+  let maxT = 0, wet = 0;
+  for (let k = 0; k < 2400 && !v.order.done; k++) { w.step(); if (v.tier > maxT) maxT = v.tier; if (!v.tier && w.grid.terrain[w.cellAt(v.x, v.y)] === T.WATER) wet++; }
+  assert(maxT === 1 && wet === 0 && v.tier === 0 && v.y < 40, `the carrier drove over the deck and down to the far bank (y ${v.y.toFixed(0)})`);
+  assert(w.exec({ t: 'order', refs: ['v' + v.id], kind: 'move', x: 200, y: 200 }).ok && v.order.tier === 1, 'an armour order onto the deck');
+  for (let k = 0; k < 2400 && !v.order.done; k++) w.step();
+  assert(v.tier === 1 && Math.hypot(v.x - 200, v.y - 200) < 6, `the carrier parks on the deck (${v.x.toFixed(0)}, ${v.y.toFixed(0)})`);
+  const h1 = w.hash(); v.tier = 0; const h2 = w.hash(); v.tier = 1;
+  assert(h1 !== h2, 'vehicle tier is in the hash');
+  w.damageBridge(w.bridges.findIndex((b) => b.deck), 1e9);
+  assert(!v.alive, 'a deck that falls takes the carrier on it with it');
+}
+{
+  // leak: a vehicle on a deck with a wall across it
+  const w = ordersWorld(BLOCKED, (ww) => assert(ww.exec({ t: 'wall.add', p: [150, 250, 250, 250] }).ok, 'wall across the deck'));
+  const v = apcAt(w, 200, 180);
+  assert(v && v.tier === 1, 'a carrier dropped onto the deck lands on it');
+  assert(w.exec({ t: 'order', refs: ['v' + v.id], kind: 'move', x: 200, y: 330 }).ok, 'ordered past the wall');
+  let maxY = 0, bad = 0;
+  for (let k = 0; k < 2400 && !v.order.done; k++) {
+    w.step();
+    if (v.tier === 1 && v.y > maxY) maxY = v.y;
+    if (v.tier === 0 && w.grid.terrain[w.cellAt(v.x, v.y)] === T.BLDG) bad++;
+  }
+  assert(maxY < 248 && !bad && v.alive, `the carrier never drove through the wall on the deck (max y on it ${maxY.toFixed(1)}), nor through the building under it`);
+}
+{
+  // gate preview: a gate across the deck opens onto the deck, not into the building under it
+  const w = world(BLOCKED);
+  assert(w.exec({ t: 'zone.add', p: rectPoly(150, 260, 250, 390) }).ok, 'zone over the deck end');
+  const q = w.gateCheck(200, 260);
+  log('gate preview on a deck', JSON.stringify({ ok: q.ok, opens: q.opens, warn: q.warn }));
+  assert(q.ok && q.opens && !q.warn, `a gate on the deck does not warn (${q.warn || 'opens'})`);
+  const z = world(mk([], { buildings: [{ p: rectPoly(120, 100, 280, 395), h: 10, k: 'ind' }] }));
+  assert(z.exec({ t: 'zone.add', p: rectPoly(150, 260, 250, 390) }).ok, 'the same zone without the deck');
+  const off = z.gateCheck(200, 260);
+  assert(off.ok && (!off.opens || off.warn), `without a deck the same gate still warns (${off.warn})`);
+}
+{
+  // determinism with orders and a vehicle on a deck map; restore replays like a fresh world
+  const script = (w, n) => {
+    const hs = [];
+    let s = null, v = null;
+    for (let k = 1; k <= n; k++) {
+      if (k === 2) { s = dropAt(w, 100, 100); v = apcAt(w, 200, 380); }
+      if (k === 10) { w.exec({ t: 'order', refs: ['s' + s.g], kind: 'move', x: 200, y: 200 }); w.exec({ t: 'order', refs: ['v' + v.id], kind: 'move', x: 200, y: 190 }); }
+      if (k === 400) w.exec({ t: 'order', refs: ['s' + s.g, 'v' + v.id], kind: 'move', x: 160, y: 200, low: true });
+      w.step();
+      if (k % 100 === 0) hs.push(w.hash());
+    }
+    return hs.join();
+  };
+  const a = ordersWorld(mk([FLY, STREET])), b = ordersWorld(mk([FLY, STREET]));
+  const ha = script(a, 800), hb = script(b, 800);
+  assert(ha === hb, 'two runs with orders and armour on a deck map hash the same');
+}
+
+// ---------------------------------------------------------------- 10. a ramp foot under a crossing street
+// The tunnel's west ramp reaches level -1 right under a north-south street: that cell stays street (shadowed), the
+// portal is still made, fields never step onto the street from the portal cell, and a zone around it stays sealed.
+{
+  const FOOT = mk([TUN, { p: [95, 0, 95, 400], w: 12, k: 'major' }], { buildings: [{ p: rectPoly(120, 0, 300, 400), h: 10, k: 'ind' }] });
+  const gr = buildGrid(FOOT, 4), dk = gr.deck;
+  const west = [...dk.portals].filter((c) => (c % gr.gw) * 4 < 120);
+  const shadow = [...dk.lvf].filter((f) => f & LV_SHADOW).length;
+  log('ramp foot under a street: portals', dk.portals.length, 'west', west.length, 'shadowed cells', shadow);
+  assert(west.length > 0 && shadow > 0 && gr.terrain[cellOf({ grid: gr }, 97, 200)] === T.ROAD, 'a portal is made where the ramp foot lies under another street, and the street stays a street');
+  const w = world(FOOT);
+  battle(w);
+  const h = w.spawn(TYPE.SOLDIER, 380, 200); w.A.stun[h] = 1e9;
+  const z = w.spawn(TYPE.ZOMBIE, 20, 200);
+  w.computeFields();
+  const sc = w.nav.scent;
+  let bad = 0;
+  for (let f = 0; f < sc.dist.length; f++) { const d = sc.dir[f]; if (d < 8) { const m = stepField(w.grid.deck, f, DX[d], DY[d]); if (m < 0 || !(sc.dist[m] < sc.dist[f])) bad++; } }
+  assert(bad === 0, `every field step, taken the way people move (portals first), goes downhill (${bad} do not)`);
+  let minT = 0, t = 0;
+  for (; t < 2400 && w.A.type[h] === TYPE.SOLDIER && w.A.type[z] === TYPE.ZOMBIE; t++) { w.step(); if (w.A.tier[z] < minT) minT = w.A.tier[z]; }
+  assert(minT === -1 && w.A.x[z] > 300, `a zombie goes down the ramp under the street and through the tunnel (x ${w.A.x[z].toFixed(0)})`);
+  leakCase('ramp foot under a street', FOOT, rectPoly(70, 160, 112, 240), [[100, 200, -1], [80, 200, 0]], [70, 200]);
+  leakCase('zone edge across the shadowed street', FOOT, rectPoly(92, 150, 118, 250), [[110, 200, -1]], null);
 }
 
 console.log('decks: all passed');
