@@ -287,24 +287,28 @@ function deliveryMarker(ctx, e, sx, sy, R, t, rt, cam, pal, world, labelFn) {
 }
 
 // ---------------------------------------------------------------- client-side markers
-// kinds: 'outbreak' {x,y,r,label}, 'pulse' {x,y,ok}, 'alert' {x,y,label}; each has rt0 (real seconds) and dur
+// kinds: 'outbreak' {x,y,r,label}, 'pulse' {x,y,ok}, 'alert' {x,y,label}; each has rt0 (real seconds) and dur.
+// With lt0 the lifetime counts the session's live clock instead (real seconds while the battle runs), so pausing holds it.
+const ageOf = (m, rt, lt) => (m.lt0 !== undefined ? lt - m.lt0 : rt - m.rt0);
+
 export class Markers {
   constructor() { this.list = []; }
   clear() { this.list.length = 0; }
   add(m) { this.list.push(m); return m; }
 
-  prune(rt) {
-    this.list = this.list.filter((m) => rt < m.rt0 + (m.dur || 2));
+  prune(rt, lt = rt) {
+    this.list = this.list.filter((m) => ageOf(m, rt, lt) < (m.dur || 2));
   }
 
-  draw(ctx, cam, t, rt, pal) {
+  draw(ctx, cam, t, rt, pal, lt = rt) {
     if (!this.list.length) return;
     const z = cam.zoom, ox = cam.x, oy = cam.y;
     ctx.save();
     for (const m of this.list) {
       const sx = (m.x - ox) * z, sy = (m.y - oy) * z;
+      const shown = rt - m.rt0;
       if (m.kind === 'outbreak') {
-        const age = rt - m.rt0, a = age < 0.25 ? age / 0.25 : Math.max(0, 1 - (age - (m.dur || 12) * 0.7) / ((m.dur || 12) * 0.3));
+        const age = ageOf(m, rt, lt), dur = m.dur || 12, a = Math.min(shown < 0.25 ? shown / 0.25 : 1, Math.max(0, 1 - (age - dur * 0.7) / (dur * 0.3)));
         const R = Math.max(14, m.r * z);
         ctx.globalAlpha = a;
         ctx.strokeStyle = pal.stamp; ctx.lineWidth = 2.5;
@@ -318,7 +322,7 @@ export class Markers {
         ctx.strokeStyle = m.ok === false ? pal.stamp : pal.ink; ctx.lineWidth = 1.5;
         ctx.beginPath(); ctx.arc(sx, sy, 4 + u * 18, 0, TAU); ctx.stroke();
       } else if (m.kind === 'alert') {
-        const age = rt - m.rt0, a = Math.max(0, Math.min(1, age / 0.2, ((m.dur || 6) - age) / 1));
+        const age = ageOf(m, rt, lt), a = Math.max(0, Math.min(1, shown / 0.2, ((m.dur || 6) - age) / 1));
         ctx.globalAlpha = a;
         stampLabel(ctx, m.label, sx, sy, m.color || pal.stamp, m.rot ?? -0.05, m.size || 13);
       }

@@ -55,6 +55,7 @@ export class Session {
     this.toolName = 'select';
     this.pacer = new Pacer(0.05);
     this.realSpeed = 0;
+    this.liveRt = 0;
     this.speedLag = false;
     this.rt = performance.now() / 1000;
     this.slowUntil = 0;
@@ -227,7 +228,7 @@ export class Session {
     on('sound', (e) => this.onSound(e));
     on('outbreak', (e) => this.onOutbreak(e));
     on('breach', () => { this.flash('A safe zone has been breached', 'alert'); });
-    on('mutation', (e) => { this.markers.add({ kind: 'alert', x: e.x, y: e.y - 24, label: 'MUTANT', rt0: this.rt, dur: 5 }); });
+    on('mutation', (e) => { this.markers.add({ kind: 'alert', x: e.x, y: e.y - 24, label: 'MUTANT', rt0: this.rt, lt0: this.liveRt, dur: 5 }); });
     on('collapse', (e) => { invalidateBuilding(this.map, e.b); this.cityDirty = true; if (this.sel && this.sel.kind === 'building' && this.sel.b === e.b) this.info.render(true); });
     on('bridgeDown', (e) => { invalidateBridge(this.map, e.id); this.cityDirty = true; });
     on('stageEnd', (e) => this.onStageEnd(e.result));
@@ -285,7 +286,7 @@ export class Session {
   onOutbreak(e) {
     const r = this.world.cfg.outbreak.radius;
     const label = e.edge ? 'HORDE' : e.secondary ? 'SECOND OUTBREAK' : 'OUTBREAK';
-    for (const [x, y] of e.sites || []) this.markers.add({ kind: 'outbreak', x, y, r: e.edge ? 40 : r, rt0: this.rt, dur: e.secondary || e.edge ? 10 : 16, label });
+    for (const [x, y] of e.sites || []) this.markers.add({ kind: 'outbreak', x, y, r: e.edge ? 40 : r, rt0: this.rt, lt0: this.liveRt, dur: e.secondary || e.edge ? 10 : 16, label });
     if (!e.secondary && !e.edge) {
       if (this.prefs.get().autoPause && !this.net) {
         this.paused = true;
@@ -891,7 +892,9 @@ export class Session {
         rs.t = 0; rs.n = 0; rs.want = 0;
       }
     } else { rs.t = 0; rs.n = 0; rs.want = 0; rs.lag = 0; this.realSpeed = 0; this.speedLag = false; }
-    this.markers.prune(this.rt);
+    // map markers age only while the battle clock runs, so a paused battle keeps them on screen
+    if (w.phase !== 'battle' || (!this.paused && !this.modalOpen())) this.liveRt += real;
+    this.markers.prune(this.rt, this.liveRt);
     this._hv = (this._hv || 0) + real;
     if (this._hv > 0.06) { this._hv = 0; this.updateHover(); }
     const g = this.input.gesture;
@@ -918,7 +921,7 @@ export class Session {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.army.draw(ctx, cam, pal);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.markers.draw(ctx, cam, t, this.rt, pal);
+    this.markers.draw(ctx, cam, t, this.rt, pal, this.liveRt);
     (this.input.gesture || this.tool).draw(ctx, cam, pal);
     if (this.partner && this.rt - this.partner.rt < 3) {
       const sx = (this.partner.x - cam.x) * cam.zoom, sy = (this.partner.y - cam.y) * cam.zoom;
