@@ -5,7 +5,7 @@ compatibility_date = "2024-11-01"
 # deploy.ps1 creates the namespace and writes its id here on the first run
 [[kv_namespaces]]
 binding = "FEEDBACK"
-id = "KV_ID_PLACEHOLDER"
+id = "19f48a37b78f46a4b63cab0207aeb84b"
 
 # the 10-minute marks and the daily cap (one instance, so parallel sends are checked one at a time)
 [[durable_objects.bindings]]
