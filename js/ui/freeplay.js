@@ -31,6 +31,7 @@ const memo = {
 };
 
 export function mount(root, app, params) {
+  let ordersReady = false; // tab, importer and library callbacks can fire before the orders panel exists
   memo.sandbox = params.sandbox === true || params.sandbox === '1' || params.sandbox === 1;
   if (params.lib) { memo.tab = 'library'; memo.libId = params.lib; }
   if (params.tab === 'osm' || params.tab === 'generated') memo.tab = params.tab;
@@ -173,6 +174,7 @@ export function mount(root, app, params) {
   function cfgNow() { return makeConfig(selectionLines(memo.sel), { difficulty: memo.difficulty, sandbox: memo.sandbox }); }
 
   function updateOrders() {
+    if (!ordersReady) return;
     const map = currentMap();
     clear(mapLine); clear(stageBox); clear(estimate); clear(loadSum);
     startBtn.disabled = !map;
@@ -272,6 +274,7 @@ export function mount(root, app, params) {
     genStatus.textContent = m.name;
     saveGen.disabled = false; editGen.disabled = false;
   } else regen(true);
+  ordersReady = true;
   updateOrders();
 
   return {
