@@ -12,10 +12,11 @@ export const OVERPASS_ENDPOINTS = OVERPASS_MIRRORS;
 export const OSM_ATTRIBUTION = '© OpenStreetMap contributors';
 export const OSM_ATTRIBUTION_URL = 'https://www.openstreetmap.org/copyright';
 export const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
-export const IMPORT_SIZES = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4];
-export const IMPORT_RANGE = { min: 0.5, max: 4, step: 0.5 };
+export const IMPORT_SIZES = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8, 9, 10];
+export const IMPORT_RANGE = { min: 0.5, max: 10, step: 0.5 };
 export const TILE_KM = 2;
-export const HUGE_LIMITS = { buildings: 30000, roads: 16000, areaKm2: 9.5 };
+export const HUGE_LIMITS = { buildings: 90000, roads: 50000, areaKm2: 26 };
+export const tileCount = (sizeKm, tileKm = TILE_KM) => Math.max(1, Math.ceil(sizeKm / tileKm - 1e-9)) ** 2;
 
 const R_EARTH = 6371008.8;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -130,6 +131,11 @@ out qt;`;
 
 let busy = false;
 const tileMemo = new Map(); // query -> result, so Retry only fetches what failed
+const pause = (ms, signal) => new Promise((res, rej) => {
+  if (signal && signal.aborted) return rej(cancelled());
+  const t = setTimeout(res, ms);
+  if (signal) signal.addEventListener('abort', () => { clearTimeout(t); rej(cancelled()); }, { once: true });
+});
 
 function linked(signal) {
   const ctl = new AbortController();
@@ -141,7 +147,7 @@ function linked(signal) {
 // Tiles run one at a time until a mirror has proven itself, then two at a time. Elements are de-duplicated.
 export async function fetchArea({ lat, lon, sizeKm = 2, onProgress, signal, fetchImpl = fetch, tileKm = TILE_KM, timeoutSec = 60 } = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('No location chosen');
-  sizeKm = clamp(+sizeKm || 2, 0.25, 6);
+  sizeKm = clamp(+sizeKm || 2, 0.25, IMPORT_RANGE.max);
   if (busy) throw new Error('An import is already running');
   busy = true;
   const t0 = now();
@@ -163,17 +169,27 @@ export async function fetchArea({ lat, lon, sizeKm = 2, onProgress, signal, fetc
       while (next < tiles.length) {
         const i = next++;
         if (tileMemo.has(queries[i])) { got[i] = tileMemo.get(queries[i]); bytes[i] = got[i].bytes; emit({ phase: 'tile', tile: i, endpoint: got[i].url }); continue; }
-        const r = await fetchQuery(queries[i], {
-          signal: link.ctl.signal, slots, fetchImpl,
-          onEvent: (e) => {
-            if (e.phase === 'download') { bytes[i] = e.bytes; if (!proven) { proven = true; spawn(); } }
-            emit({ ...e, tile: i });
-          },
-        });
+        let r = null;
+        // a big square does not give up on one part the servers are too busy for: that part waits and asks again
+        for (let wait = 0; !r; wait++) {
+          try {
+            r = await fetchQuery(queries[i], {
+              signal: link.ctl.signal, slots, fetchImpl,
+              onEvent: (e) => {
+                if (e.phase === 'download') { bytes[i] = e.bytes; if (!proven) { proven = true; spawn(); } }
+                emit({ ...e, tile: i });
+              },
+            });
+          } catch (e) {
+            if (e.cancelled || !e.busy || tiles.length < 2 || wait >= NET.tileWaitMs.length) throw e;
+            emit({ phase: 'partwait', wait: NET.tileWaitMs[wait], tile: i });
+            await pause(NET.tileWaitMs[wait], link.ctl.signal);
+          }
+        }
         got[i] = r;
         bytes[i] = r.bytes;
         tileMemo.set(queries[i], r);
-        while (tileMemo.size > 8) tileMemo.delete(tileMemo.keys().next().value);
+        while (tileMemo.size > 36) tileMemo.delete(tileMemo.keys().next().value);
         emit({ phase: 'tile', tile: i, endpoint: r.url });
         proven = true;
         spawn();
@@ -212,7 +228,7 @@ export async function fetchArea({ lat, lon, sizeKm = 2, onProgress, signal, fetc
   } finally { busy = false; link.done(); }
 }
 
-// Square of a file's data: centre of its bounds, side = the shorter edge, in 0.5 km steps up to 4 km.
+// Square of a file's data: centre of its bounds, side = the shorter edge, in 0.5 km steps up to IMPORT_RANGE.max.
 export function fileSquare(bounds) {
   if (!bounds) throw new Error('The file has no location data');
   const lat = (bounds.s + bounds.n) / 2, lon = (bounds.w + bounds.e) / 2;
@@ -267,7 +283,7 @@ export async function importPlace({ lat, lon, sizeKm = 2, name, stages = 5, onPr
   if (signal && signal.aborted) throw cancelled();
   const stats = mapStats(map);
   const huge = isHugeMap(map);
-  if (huge) warnings.push('Large map: expect slower simulation on modest computers.');
+  if (huge) warnings.push('Large map: it needs a desktop with plenty of memory, and the crowd is thinned so the simulation keeps up.');
   if (!map.buildings.length) warnings.push('No buildings found in this area.');
   emit({ phase: 'done' });
   return { map, huge, warnings, stats, source, info, lat, lon, sizeKm };
@@ -455,7 +471,7 @@ const ring = c => { const f = flat(c); if (isClosed(c)) f.length -= 2; return f;
 export function osmToMap(raw, opts = {}) {
   const lat0 = +opts.lat, lon0 = +opts.lon;
   if (!Number.isFinite(lat0) || !Number.isFinite(lon0)) throw new Error('osmToMap needs the centre lat/lon');
-  const sizeKm = clamp(+opts.sizeKm || 2, 0.25, 6);
+  const sizeKm = clamp(+opts.sizeKm || 2, 0.25, IMPORT_RANGE.max);
   const W = Math.round(sizeKm * 1000), H = W;
   const kx = (R_EARTH * Math.PI / 180) * Math.cos(lat0 * Math.PI / 180), ky = R_EARTH * Math.PI / 180;
   const px = lon => (lon - lon0) * kx + W / 2, py = lat => (lat0 - lat) * ky + H / 2;

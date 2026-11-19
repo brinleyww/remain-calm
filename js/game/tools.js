@@ -44,7 +44,8 @@ class Tool {
 }
 
 // ---------------------------------------------------------------- select / inspect
-// Left-drag draws a selection box and clicks pick squads (game/selection.js); right, middle drag and keys pan.
+// Left-drag draws a selection box; a click picks the build under the cursor, then troops (game/selection.js and
+// game/pick.js); right, middle drag and keys pan.
 export class SelectTool extends Tool {
   get name() { return 'select'; }
   get drag() { return !!this.s.army.box; }
@@ -556,7 +557,7 @@ export class UpgradeTool extends Tool {
   move(e) { this.hover = e; if (this.done && e.buttons & 1) this.apply(e); }
   up() { this.done = null; }
   apply(e) {
-    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy);
+    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy, null, e.alt);
     if (!u || this.done.has(u.id)) return;
     this.done.add(u.id);
     this.s.issue({ t: 'unit.upgrade', id: u.id, owner: this.s.owner });
@@ -565,7 +566,7 @@ export class UpgradeTool extends Tool {
   label() {
     const e = this.hover;
     if (!e) return null;
-    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy);
+    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy, null, e.alt);
     if (!u) return { title: 'UPGRADE', ok: null, note: 'click or drag over units' };
     const q = this.quote({ t: 'unit.upgrade', id: u.id, owner: this.s.owner }, `${u.id}|${u.level}`);
     const nx = this.s.combat.nextUpgradeStat(u);
@@ -575,7 +576,7 @@ export class UpgradeTool extends Tool {
   draw(ctx, cam, pal) {
     const e = this.hover;
     if (!e) return;
-    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy);
+    const u = this.s.pickUnit(e.sx, e.sy, e.wx, e.wy, null, e.alt);
     if (!u) return;
     const [x, y] = toScreen(cam, u.x, u.y);
     ctx.save(); ctx.strokeStyle = this.q && this.q.ok === false ? pal.stamp : pal.approve; ctx.lineWidth = 2; ctx.strokeRect(x - 12, y - 12, 24, 24); ctx.restore();
@@ -601,7 +602,7 @@ export class RefundTool extends Tool {
       this.s.openRefundPanel(items);
       return;
     }
-    const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy);
+    const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy, e.alt);
     if (!it) { this.s.flash('Nothing to refund here', 'warn'); return; }
     this.s.issue(it.cmd);
   }
@@ -610,7 +611,7 @@ export class RefundTool extends Tool {
     const e = this.hover;
     if (!e) return null;
     if (this.a && this.box) return { title: 'REFUND', ok: null, note: 'release to list what is inside' };
-    const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy);
+    const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy, e.alt);
     if (!it) return { title: 'REFUND', ok: null, note: 'click a placement or drag a box' };
     const q = this.quote(it.cmd, it.key);
     const back = q && q.ok ? (q.refund !== undefined ? q.refund : this.world.refundValue(it.paid)) : 0;
@@ -626,7 +627,7 @@ export class RefundTool extends Tool {
       const x = Math.min(this.a.sx, e.sx), y = Math.min(this.a.sy, e.sy), w = Math.abs(e.sx - this.a.sx), h = Math.abs(e.sy - this.a.sy);
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
     } else {
-      const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy);
+      const it = this.s.pickPlacement(e.sx, e.sy, e.wx, e.wy, e.alt);
       if (it) {
         const [x, y] = toScreen(cam, it.x, it.y);
         ctx.strokeStyle = pal.stamp; ctx.lineWidth = 2;

@@ -20,7 +20,7 @@ export function normalizeCityOptions(opts = {}) {
   const water = WATER_TYPES.includes(opts.water) ? opts.water : 'none';
   return {
     seed,
-    sizeKm: clamp(+opts.sizeKm || 2, 0.5, 6),
+    sizeKm: clamp(+opts.sizeKm || 2, 0.5, 10),
     water,
     density: clamp(opts.density == null || opts.density === '' ? 0.6 : +opts.density || 0, 0, 1),
     bridges: water === 'none' ? 0 : clamp(Math.round(opts.bridges == null ? 3 : +opts.bridges || 0), 0, 16),
@@ -35,6 +35,8 @@ export function generateCity(options = {}) {
   const ctx = {
     // dens: the build-up the generator works with; the slider's 0% still gives a loose town, 100% a packed core
     o, W, H, S: o.sizeKm, rng: new Rng(o.seed), dens: 0.3 + 0.7 * o.density,
+    // metro: sheets above 6 km keep a core the size of a 5 km city and grow outward (satellite towns, an orbital road)
+    metro: o.sizeKm > 6, sats: [],
     occ: makeOcc(W, H, OCC_CELL),
     roads: [], parks: [], buildings: [], reserves: [], ponds: [], extraWater: [], cands: [],
   };
@@ -43,6 +45,7 @@ export function generateCity(options = {}) {
   buildWater(ctx);
   buildLandGrid(ctx);
   chooseCentre(ctx);
+  chooseSatellites(ctx);
   planRail(ctx);
   setupWarp(ctx);
   planDistricts(ctx);
@@ -368,7 +371,7 @@ function buildWater(ctx) {
     const off = W * rng.range(0.11, 0.2) * rng.sign();
     const mx = W / 2 - dy * off, my = H / 2 + dx * off, L = W * 0.9;
     const main = addRiver(mx - dx * L, my - dy * L, mx + dx * L, my + dy * L, baseW, Math.max(70, W * 0.07), false);
-    if (S >= 2.5 && rng.chance(0.55)) {
+    if (S >= 2.5 && (rng.chance(0.55) || ctx.metro)) {
       const k = Math.floor(main.n * rng.range(0.38, 0.62));
       const jx = main.pts[2 * k], jy = main.pts[2 * k + 1], side = Math.sign(off) || 1;
       const ta = rng.range(-0.45, 0.45);
@@ -609,8 +612,9 @@ function chooseCentre(ctx) {
   const minDw = o.water === 'none' ? 0 : 80 + 30 * S;
   const R = 200 + 60 * S;
   let best = null, bs = -Infinity;
+  const spread = ctx.metro ? 0.18 : 0.3;
   for (let k = 0; k < 320; k++) {
-    const x = W * (0.5 + rng.range(-0.3, 0.3)), y = H * (0.5 + rng.range(-0.3, 0.3));
+    const x = W * (0.5 + rng.range(-spread, spread)), y = H * (0.5 + rng.range(-spread, spread));
     if (!isLand(ctx, x, y)) continue;
     const dw = waterDist(ctx, x, y);
     if (dw < minDw) continue;
@@ -623,9 +627,9 @@ function chooseCentre(ctx) {
     if (s > bs) { bs = s; best = [x, y]; }
   }
   [ctx.cx, ctx.cy] = best || [W / 2, H / 2];
-  const d = ctx.dens;
-  ctx.Rd = (140 + 120 * S) * (0.65 + 0.7 * d);
-  ctx.Rmid = ctx.Rd + (300 + 230 * S) * (0.4 + 0.9 * d);
+  const d = ctx.dens, Sc = ctx.metro ? 4 + (S - 4) * 0.25 : S;
+  ctx.Rd = (140 + 120 * Sc) * (0.65 + 0.7 * d);
+  ctx.Rmid = ctx.Rd + (300 + 230 * Sc) * (0.4 + 0.9 * d);
   ctx.hTop = 40 + (60 + 120 * d) * Math.min(1, 0.35 + 0.2 * S);
   ctx.theta0 = rng.range(-Math.PI / 4, Math.PI / 4);
   const a = ctx.Rd * rng.range(1.0, 1.2), b = ctx.Rd * rng.range(0.72, 0.92), ch = Math.min(a, b) * rng.range(0.2, 0.38);
@@ -635,7 +639,24 @@ function chooseCentre(ctx) {
 }
 
 function planRail(ctx) {
-  const { W, H, cx, cy, Rd, occ } = ctx, rng = ctx.rng.fork('rail');
+  const best = railLine(ctx, ctx.rng.fork('rail'), null);
+  ctx.rail = [];
+  if (!best) return;
+  addRail(ctx, best);
+  // a metro gets a second line well away from the first
+  if (ctx.metro) { const second = railLine(ctx, ctx.rng.fork('rail2'), best); if (second) addRail(ctx, second); }
+}
+
+function addRail(ctx, pts) {
+  const { W, H } = ctx, n0 = ctx.rail.length;
+  for (const piece of clipLineRect(pts, -2, -2, W + 2, H + 2)) {
+    for (const q of cutByWater(ctx, piece)) ctx.rail.push(q);
+  }
+  for (let k = n0; k < ctx.rail.length; k++) stampLine(ctx.occ, ctx.rail[k], 18, RAIL, 2);
+}
+
+function railLine(ctx, rng, avoid) {
+  const { W, H, cx, cy, Rd, occ } = ctx;
   const edgePt = (e, t) => [[t * W, -200], [W + 200, t * H], [t * W, H + 200], [-200, t * H]][e];
   let best = null, bs = Infinity;
   for (let k = 0; k < 36; k++) {
@@ -653,15 +674,38 @@ function planRail(ctx) {
       if (occAt(occ, pts[i], pts[i + 1]) === WATER) wl++;
       minD = Math.min(minD, dist(pts[i], pts[i + 1], cx, cy));
     }
-    const score = wl * 40 + turn * 250 + Math.abs(minD - Rd - 120) * 0.3 + rng.range(0, 60);
+    let score = wl * 40 + turn * 250 + Math.abs(minD - Rd - 120) * 0.3 + rng.range(0, 60);
+    if (avoid) {
+      let close = 0;
+      for (let i = 0; i < pts.length; i += 8) for (let j = 0; j < avoid.length; j += 16) if (dist(pts[i], pts[i + 1], avoid[j], avoid[j + 1]) < W * 0.12) { close++; break; }
+      score += close * 60;
+    }
     if (score < bs) { bs = score; best = pts; }
   }
-  ctx.rail = [];
-  if (!best) return;
-  for (const piece of clipLineRect(best, -2, -2, W + 2, H + 2)) {
-    for (const q of cutByWater(ctx, piece)) ctx.rail.push(q);
+  return best;
+}
+
+// Two to four satellite town centres out in the suburbs of a metro sheet, each a few blocks of mid-rise streets.
+function chooseSatellites(ctx) {
+  if (!ctx.metro) return;
+  const { W, H, S, cx, cy, Rmid, o } = ctx, rng = ctx.rng.fork('metro-sats');
+  const n = S >= 9 ? 4 : 3, a0 = rng.range(0, TAU);
+  for (let k = 0; k < n; k++) {
+    let best = null, bs = -Infinity;
+    for (let t = 0; t < 60; t++) {
+      const a = a0 + (k + rng.range(-0.35, 0.35)) * TAU / n, r = Rmid + rng.range(650, 1500);
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      if (x < 450 || y < 450 || x > W - 450 || y > H - 450 || !isLand(ctx, x, y)) continue;
+      const dw = waterDist(ctx, x, y);
+      if (o.water !== 'none' && dw < 140) continue;
+      let land = 0;
+      for (let q = 0; q < 8; q++) if (isLand(ctx, x + Math.cos(q * TAU / 8) * 380, y + Math.sin(q * TAU / 8) * 380)) land++;
+      if (land < 6 || ctx.sats.some(sv => dist(x, y, sv.x, sv.y) < 1800)) continue;
+      const sc = land + Math.min(dw, 600) / 300 + rng.range(0, 1.5);
+      if (sc > bs) { bs = sc; best = { x, y, R: rng.range(380, 520) }; }
+    }
+    if (best) ctx.sats.push(best);
   }
-  for (const r of ctx.rail) stampLine(occ, r, 18, RAIL, 2);
 }
 
 // Split a polyline where it comes within `clear` metres (sideways) of water or hits a blocked cell.
@@ -759,7 +803,7 @@ function voronoi(seeds, domain, reach) {
 
 function planDistricts(ctx) {
   const { W, H, S, o, cx, cy, Rd, Rmid } = ctx, rng = ctx.rng.fork('districts');
-  const sp = 380 + 70 * S, m = sp * 0.6;
+  const sp = 380 + 70 * (ctx.metro ? 5 : S), m = sp * 0.6;
   const x0 = -m, y0 = -m, x1 = W + m, y1 = H + m;
   const nx = Math.max(2, Math.round((x1 - x0) / sp)), ny = Math.max(2, Math.round((y1 - y0) / sp));
   const sx = (x1 - x0) / nx, sy = (y1 - y0) / ny;
@@ -808,12 +852,21 @@ function planDistricts(ctx) {
       if (d.style === 'wavy') { d.sB = rng.range(170, 260); d.amp = rng.range(10, 0.28 * d.sA); d.lam = rng.range(200, 380); d.phase = rng.range(0, TAU); }
     }
   }
+  if (ctx.metro) {
+    const mr = ctx.rng.fork('metro-districts');
+    for (const d of ds) {
+      if (!live(d) || !ctx.sats.some(sv => dist(d.cx, d.cy, sv.x, sv.y) < sv.R + sp * 0.35)) continue;
+      d.zone = MID; d.style = 'grid'; d.sat = true;
+      d.theta = ctx.theta0 + mr.range(-0.8, 0.8);
+      d.sA = mr.range(72, 96); d.sB = mr.range(100, 140); d.drop = 0.12;
+    }
+  }
   ctx.oldTown = null;
   if (rng.chance(0.7)) {
     const cand = ds.filter(d => live(d) && d.zone === MID && d.inDt < 0.45 && d.land > 0.6).sort((a, b) => a.d - b.d)[0];
     if (cand) { cand.style = 'organic'; cand.zone = OLD; ctx.oldTown = cand; }
   }
-  const outer = ds.filter(d => live(d) && d.d > Rd + 250 && d.zone !== OLD);
+  const outer = ds.filter(d => live(d) && d.d > Rd + 250 && d.zone !== OLD && !d.sat);
   const nInd = Math.max(S >= 1.5 ? 1 : rng.chance(0.5) ? 1 : 0, Math.round(outer.length * 0.16));
   const railD = (x, y) => { let b = Infinity; for (const r of ctx.rail) for (let i = 0; i < r.length; i += 8) b = Math.min(b, dist(x, y, r[i], r[i + 1])); return b; };
   for (const d of outer) {
@@ -825,10 +878,15 @@ function planDistricts(ctx) {
     d.zone = IND; d.style = 'grid'; d.theta = ctx.theta0 + rng.range(-0.5, 0.5);
     d.sA = rng.range(130, 190); d.sB = rng.range(170, 260); d.drop = 0.2;
   }
-  const nPark = S >= 2.5 ? 1 + (S >= 4 ? 1 : 0) : 0;
-  const parkC = ds.filter(d => live(d) && (d.zone === MID || d.zone === SUB) && d.d > Rd * 0.9 && d.d < Rmid * 1.3 && d.land > 0.9 && d.inDt < 0.1 && d.inMap > 0.95);
+  const nPark = ctx.metro ? Math.round(S * S / 18) : S >= 2.5 ? 1 + (S >= 4 ? 1 : 0) : 0;
+  const parkC = ds.filter(d => live(d) && !d.sat && (d.zone === MID || d.zone === SUB) && d.d > Rd * 0.9 && d.d < Rmid * (ctx.metro ? 1.8 : 1.3) && d.land > 0.9 && d.inDt < 0.1 && d.inMap > 0.95);
   rng.shuffle(parkC);
   for (const d of parkC.slice(0, nPark)) { d.style = 'park'; d.zone = PRK; }
+  if (ctx.metro) {
+    // a broken green belt of commons and woods out towards the sheet edge
+    const gr = ctx.rng.fork('metro-green');
+    for (const d of ds) if (live(d) && !d.sat && d.zone === SUB && d.d > Rmid + 900 && d.land > 0.8 && gr.chance(0.12)) { d.style = 'park'; d.zone = PRK; }
+  }
 
   // big-site requests (reservations aligned to street blocks)
   const grids = ds.filter(d => d.style === 'grid' && d.inMap > 0.9 && d.land > 0.85);
@@ -838,9 +896,9 @@ function planDistricts(ctx) {
     for (let k = 0; k < n; k++) for (const d of c) { d.requests.push({ kind, bu, bv, alt: true, group: kind + k }); }
   };
   ctx.dtReq = [{ kind: 'plaza', bu: 1, bv: 1 }, { kind: 'park', bu: 1, bv: 1 }];
-  if (S >= 2) want('stadium', 2, 2, d => d.zone !== IND && d.d > Rd * 1.1, 1);
+  if (S >= 2) want('stadium', 2, 2, d => d.zone !== IND && d.d > Rd * 1.1, ctx.metro ? 2 : 1);
   want('hospital', 1, 2, d => d.zone === MID || d.zone === SUB, Math.max(1, Math.round(ctx.landKm2 / 5)));
-  if (S >= 1.5) want('mall', 1, 2, d => d.zone === SUB || d.zone === MID, 1 + (S >= 4 ? 1 : 0));
+  if (S >= 1.5) want('mall', 1, 2, d => d.zone === SUB || d.zone === MID, 1 + (S >= 4 ? 1 : 0) + (ctx.metro ? ctx.sats.length : 0));
   if (S >= 3 && rng.chance(0.6)) want('park', 2, 3, d => d.zone === MID, 1);
   for (const d of grids) if (d.zone === MID && rng.chance(0.45)) d.requests.push({ kind: 'park', bu: 1, bv: 1 });
   for (const d of grids) if (d.zone === SUB && rng.chance(0.25)) d.requests.push({ kind: 'park', bu: 1, bv: 1 });
@@ -871,6 +929,13 @@ function layStreets(ctx) {
       const nm = ctx.names.street(true), wid = rng.range(12, 15) * trunk;
       for (const piece of clipPolyline([v.x, v.y, w.x, w.y], null, [dt])) if (polyLen(piece) > 4) R.push({ p: piece, w: wid, k: 'major', cls: 'art', name: nm });
     }
+  }
+  if (ctx.metro) {
+    const rr = ctx.rng.fork('metro-orbital');
+    const R0 = ctx.Rmid + rr.range(220, 420), g = harmonics(rr, 3, 0.07), pts = [];
+    for (let k = 0; k < 180; k++) { const a = k / 180 * TAU, r = R0 * g(a); pts.push(ctx.cx + Math.cos(a) * r, ctx.cy + Math.sin(a) * r); }
+    const nm = ctx.name.split(' ')[0] + ' Orbital';
+    for (const piece of clipPolyline(closeRing(pts), null, [dt])) if (polyLen(piece) > 4) R.push({ p: piece, w: 17 * trunk, k: 'major', cls: 'art', name: nm });
   }
   for (const d of ctx.districts) {
     if (d.style === 'none') continue;
@@ -2020,31 +2085,55 @@ function assignSpecials(ctx) {
   for (const b of B) if (b.planted) b.special = true;
   const order = B.map((b, i) => i);
   rng.shuffle(order);
+  // Candidates only ever drop out (taken, or too close to a new pick), so each (use, relax) scan resumes where the
+  // last one stopped, and the spacing test looks at nearby picks only: the same picks as a full rescan, in linear time.
+  const RELAX = [1, 0.5, 0];
   for (const kind of ['rescue', 'civic', 'trade', 'armory', 'hazard']) {
     const plan = SPECIAL_PLAN[kind];
     const need = counts[kind] - placed[kind].length;
     const spacing = Math.sqrt(land * 1e6 / counts[kind]) * 0.55;
     const tally = {};
     for (const b of placed[kind]) tally[b.use] = (tally[b.use] || 0) + 1;
+    const near = RELAX.map(relax => (spacing * relax > 0 ? { sp: spacing * relax, cells: new Map() } : null));
+    const addNear = b => {
+      for (const g of near) if (g) {
+        const k = Math.floor(b.cx / g.sp) * 65536 + Math.floor(b.cy / g.sp);
+        let l = g.cells.get(k);
+        if (!l) g.cells.set(k, l = []);
+        l.push(b);
+      }
+    };
+    const crowded = (g, b) => {
+      const gx = Math.floor(b.cx / g.sp), gy = Math.floor(b.cy / g.sp), sp2 = g.sp * g.sp;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const l = g.cells.get((gx + dx) * 65536 + gy + dy);
+        if (l) for (const o of l) if ((o.cx - b.cx) ** 2 + (o.cy - b.cy) ** 2 < sp2) return true;
+      }
+      return false;
+    };
+    for (const b of placed[kind]) addNear(b);
+    const cursor = new Map();
     for (let n = 0; n < need; n++) {
       let use = null, worst = Infinity;
       for (const [u, w] of plan) { const r = (tally[u] || 0) / w; if (r < worst) { worst = r; use = u; } }
       const filt = USE_FILTER[use];
       let pick = null;
-      for (const relax of [1, 0.5, 0]) {
-        const sp = spacing * relax;
-        for (const i of order) {
-          const b = B[i];
+      for (let ri = 0; ri < RELAX.length && !pick; ri++) {
+        const g = near[ri], ck = use + '|' + ri;
+        let k = cursor.get(ck) || 0;
+        for (; k < order.length; k++) {
+          const b = B[order[k]];
           if (b.special || b.k === 'landmark' || !filt(b)) continue;
-          if (sp > 0 && placed[kind].some(o => (o.cx - b.cx) ** 2 + (o.cy - b.cy) ** 2 < sp * sp)) continue;
+          if (g && crowded(g, b)) continue;
           pick = b; break;
         }
-        if (pick) break;
+        cursor.set(ck, k);
       }
       tally[use] = (tally[use] || 0) + 1;
       if (!pick) continue;
       relabel(ctx, pick, kind, use, rng);
       placed[kind].push(pick);
+      addNear(pick);
     }
   }
   const towers = B.filter(b => !b.special && b.zone === DT && b.h >= 60).sort((a, b) => b.h - a.h);

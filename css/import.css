@@ -56,6 +56,9 @@
 .tmap-square::before { width: 14px; height: 1.5px; margin: -.75px 0 0 -7px; }
 .tmap-square::after { width: 1.5px; height: 14px; margin: -7px 0 0 -.75px; }
 .tmap-tag { position: absolute; left: -2px; top: -1.45rem; padding: 2px 6px 1px; background: var(--stamp); color: var(--card); font: 700 var(--fs-0)/1.2 var(--font-mono); letter-spacing: .06em; white-space: nowrap; }
+.tmap-parts { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.tmap-parts line { stroke: var(--stamp); stroke-width: 1; stroke-dasharray: 4 3; opacity: .75; }
+.tmap-part-done { fill: color-mix(in srgb, var(--ink) 22%, transparent); }
 .tmap-empty { position: absolute; inset: 0; display: grid; place-items: center; }
 .tmap-empty::before { content: ""; position: absolute; inset: 0; background: var(--ink-3); opacity: .22; -webkit-mask: var(--mask-hatch) 0 0 / 7px repeat; mask: var(--mask-hatch) 0 0 / 7px repeat; }
 .tmap-empty .label { position: relative; background: var(--paper-2); padding: 4px 8px; border: 1px solid var(--ink-3); }

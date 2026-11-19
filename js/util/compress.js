@@ -1,7 +1,7 @@
 // Text <-> share code: gzip (CompressionStream) + base64url. Works in browsers and Node 18+.
 // Code layout: "RC1." + base64url(gzip(utf8)). "RC0." marks an uncompressed payload (no CompressionStream).
 
-const MAX_OUT = 96 * 1024 * 1024;
+const MAX_OUT = 192 * 1024 * 1024;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 

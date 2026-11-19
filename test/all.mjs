@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const SUITES = ['sim_all.mjs', 'movement.mjs', 'combat_all.mjs', 'combat_targeting.mjs', 'orders.mjs', 'naval.mjs', 'map_format.mjs', 'map_citygen.mjs', 'map_osm.mjs', 'shell_meta.mjs', 'editor_model.mjs', 'net_lockstep.mjs', 'speed_pacing.mjs', 'integration.mjs'];
+const SUITES = ['sim_all.mjs', 'movement.mjs', 'combat_all.mjs', 'combat_targeting.mjs', 'orders.mjs', 'picking.mjs', 'naval.mjs', 'map_format.mjs', 'map_citygen.mjs', 'map_osm.mjs', 'bigmap.mjs', 'shell_meta.mjs', 'editor_model.mjs', 'net_lockstep.mjs', 'speed_pacing.mjs', 'integration.mjs', 'trains.mjs'];
 const failed = [];
 for (const f of SUITES) {
   const t0 = Date.now();

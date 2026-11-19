@@ -1,6 +1,6 @@
 // Free Play / Sandbox setup: choose a map (generated, real place, library), mutators, difficulty, loadout.
 import { WATER_TYPES } from '../map/citygen.js';
-import { mapStats } from '../map/format.js';
+import { mapStats, popLimit } from '../map/format.js';
 import { getItem, saveItem } from '../map/library.js';
 import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL } from '../map/osm.js';
 import { makeConfig } from '../data/config.js';
@@ -10,7 +10,7 @@ import { ALL_ITEMS } from '../map/campaign.js';
 import { h, append, clear, sfx, fmtInt, fmtMoney, toast, debounce, isTyping, keycap, openModal } from './dom.js';
 import { screenFrame, folderTabs, difficultySeg, segControl, slider, field, stageSeal, DIFF_LABEL } from './screen.js';
 import { generate } from './gen.js';
-import { mapPreview, mapFacts, mapKeyFor, stageCaps, civEstimate, fitLoadout, abilitySpOf, WATER_LABEL } from './mapinfo.js';
+import { mapPreview, mapFacts, mapKeyFor, stageCaps, civEstimate, crowdLine, fitLoadout, abilitySpOf, WATER_LABEL } from './mapinfo.js';
 import { mutatorPicker, newSelection, selectionLines, selectionNames } from './mutators.js';
 import { libraryPicker } from './library.js';
 import { mountImport } from './import.js';
@@ -72,7 +72,12 @@ export function mount(root, app, params) {
   seedIn.value = g.seed;
   const nameIn = h('input.input', { type: 'text', maxLength: 80, placeholder: 'Leave blank for a generated name' });
   nameIn.value = g.name;
-  const sizeS = slider({ min: 1, max: 5, step: 0.1, value: g.sizeKm, format: v => v.toFixed(1) + ' km', oninput: v => { g.sizeKm = v; regen(); } });
+  const sizeHint = h('span.hint');
+  const sizeNote = (map) => {
+    if (map && Math.abs(map.w / 1000 - g.sizeKm) < 0.05) sizeHint.textContent = crowdLine(map, getSettings().popScale, cfgNow());
+    else sizeHint.textContent = g.sizeKm > 5 ? `${g.sizeKm.toFixed(1)} km sheet · a city this size takes a few seconds to draw and runs with a thinned crowd` : `${g.sizeKm.toFixed(1)} km sheet`;
+  };
+  const sizeS = slider({ min: 1, max: 10, step: 0.1, value: g.sizeKm, format: v => v.toFixed(1) + ' km', oninput: v => { g.sizeKm = v; sizeNote(null); regen(); } });
   const densS = slider({ min: 0, max: 1, step: 0.05, value: g.density, format: v => Math.round(v * 100) + '%', oninput: v => { g.density = v; regen(); } });
   const bridgeS = slider({ min: 0, max: 8, step: 1, value: g.bridges, format: v => String(v), oninput: v => { g.bridges = v; regen(); } });
   const waterSeg = segControl(WATER_TYPES.map(w => ({ value: w, label: WATER_LABEL[w] || w })), g.water, v => { g.water = v; syncBridges(); regen(); }, { label: 'Water' });
@@ -87,7 +92,7 @@ export function mount(root, app, params) {
   panes.generated.append(h('div.gen-grid',
     h('div.gen-form',
       field('Seed', h('div.seed-row', seedIn, reroll), 'Any word or number. The same seed always draws the same city.'),
-      field('Size', sizeS.el),
+      field('Size', sizeS.el, sizeHint),
       field('Water', waterSeg.el),
       field('Density', densS.el),
       field('Bridges', bridgeS.el, 'Crossings over the water, when there is any.'),
@@ -109,6 +114,7 @@ export function mount(root, app, params) {
       clear(genFacts);
       genFacts.appendChild(mapFacts(map, mapStats(map)));
       genStatus.textContent = `${map.name} · drawn in ${Math.round(performance.now() - t0)} ms`;
+      sizeNote(map);
       saveGen.disabled = false; editGen.disabled = false;
       if (memo.tab === 'generated') updateOrders();
     } catch (e) {
@@ -200,7 +206,8 @@ export function mount(root, app, params) {
 
     const cfg = cfgNow();
     const caps = stageCaps(map, memo.startStage, cfg, memo.difficulty, memo.sandbox);
-    const civ = civEstimate(caps.C, getSettings().popScale, cfg);
+    const lim = popLimit(map, cfg);
+    const civ = civEstimate(caps.C, getSettings().popScale, cfg, lim.factor);
     estimate.append(
       h('div.kv', h('span', `Stage ${memo.startStage + 1} residents`), h('i'), h('b', fmtInt(caps.C))),
       h('div.kv', h('span', 'Civilians on the map'), h('i'), h('b', fmtInt(civ.n) + (civ.capped ? ' (capped)' : ''))),
@@ -208,6 +215,7 @@ export function mount(root, app, params) {
       h('div.kv', h('span', 'Command points'), h('i'), h('b', memo.sandbox ? 'Unlimited' : caps.sp + ' SP')));
     const names = selectionNames(memo.sel);
     if (names.length) estimate.appendChild(h('p.tiny.muted.orders-muts', 'Mutators: ' + names.join(', ')));
+    if (lim.limited) estimate.appendChild(h('p.tiny.muted', `Big sheet: residents thinned to ${Math.max(1, Math.round(lim.factor * 100))}% so it runs smoothly. A higher population scale in Settings adds more, at your own risk.`));
     if (civ.n > 40000) estimate.appendChild(h('p.tiny.err-text', 'Heavy simulation: lower the population scale in Settings if it stutters.'));
 
     const unlocked = memo.sandbox ? new Set(ALL_ITEMS) : freePlaySet();
@@ -267,6 +275,7 @@ export function mount(root, app, params) {
   }
 
   folder.select(memo.tab);
+  sizeNote(memo.maps.generated);
   if (memo.maps.generated) {
     const m = memo.maps.generated;
     genPreview.set(m, 0);

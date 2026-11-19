@@ -1,5 +1,5 @@
 // Stage lifecycle: begin (restore city, respawn civilians), READY (outbreak), win / lose / softlock, score and badge.
-import { T } from '../map/format.js';
+import { T, popLimit } from '../map/format.js';
 import { Rng, hash2, hashStr } from '../util/rng.js';
 import { polyArea, polyBBox, pointInPoly, rectPoly, clamp } from '../util/geom.js';
 import { P_ZOM, rebuildPass, computeFieldsNow, nearestPassable, isWalkTerrain } from './nav.js';
@@ -46,6 +46,12 @@ export function beginStage(world, idx) {
   world.effects.length = 0;
   world.pickups.length = 0;
   world.stats = freshStats();
+  if (world.popFactor === undefined) {
+    const lim = popLimit(world.map, world.cfg);
+    world.popFactor = lim.factor;
+    world.popLimited = lim.limited;
+  }
+  world.popScale = world.cfg.population.scale * world.popFactor;
   for (const pl of world.zones.polys) pl.breached = false;
   rebuildZones(world);
   rebuildPass(world);
@@ -78,7 +84,7 @@ function zOrder(x, y) {
 function spawnCivilians(world) {
   const cfg = world.cfg, pc = cfg.population, g = world.grid, mask = world.region.mask;
   const rng = new Rng(hash2(world.seed, 0x71c0 + world.stage));
-  let N = Math.round(world.C * pc.scale);
+  let N = Math.round(world.C * world.popScale);
   const cap = cfg.sim.maxAgents || 250000;
   world.largeMap = N > cap;
   if (N > cap) N = cap;
@@ -246,7 +252,7 @@ export function outbreak(world, secondary = false) {
   const cfg = world.cfg, oc = cfg.outbreak, diff = cfg.diff;
   const km2 = world.region.areaM2 / 1e6;
   const sites = secondary ? 1 : Math.max(1, Math.round(clamp(Math.round(km2 * oc.perKm2), oc.minSites, oc.maxSites) * (diff.outbreakMul || 1)));
-  const per = Math.max(1, Math.round((oc.zombies + oc.zombiesPerLevel * world.stage) * (oc.zombieScaleWithPop ? cfg.population.scale : 1)));
+  const per = Math.max(1, Math.round((oc.zombies + oc.zombiesPerLevel * world.stage) * (oc.zombieScaleWithPop ? world.popScale : 1)));
   const rng = secondary ? world.rng : new Rng(hash2(hash2(world.seed, 0x0b5e + world.stage), placementsHash(world)));
   const zd = zoneDistance(world);
   const bb = world.region.bbox, poly = world.region.poly;
@@ -293,7 +299,7 @@ function edgeWave(world) {
     if (c < 0) continue;
     const g = world.grid, cx = (c % g.gw + 0.5) * g.cell, cy = (((c / g.gw) | 0) + 0.5) * g.cell;
     if (!siteOk(world, zd, cx, cy, oc.minDistFromZone)) continue;
-    const count = Math.max(1, Math.round((oc.edgeWaveZombies || 21) * (+oc.edgeWaves || 1) * (oc.zombieScaleWithPop ? cfg.population.scale : 1)));
+    const count = Math.max(1, Math.round((oc.edgeWaveZombies || 21) * (+oc.edgeWaves || 1) * (oc.zombieScaleWithPop ? world.popScale : 1)));
     placeHorde(world, rng, zd, cx, cy, 30, count, 0);
     world.events.emit('outbreak', { sites: [[cx, cy]], edge: true });
     world.events.emit('log', { msg: 'HORDE AT THE CITY LIMITS', kind: 'alert', x: cx, y: cy });

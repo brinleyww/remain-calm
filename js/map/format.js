@@ -144,7 +144,8 @@ export function makeStages(w, h, count, opts = {}) {
   count = clamp(Math.round(count) || 3, 1, LIMITS.maxLevels);
   const cx = opts.cx ?? w / 2, cy = opts.cy ?? h / 2;
   const rng = new Rng((opts.seed ?? 1) ^ 0x5a17);
-  const NA = 48;
+  // big sheets get more outline points so a 4 km wide stage ring is not drawn in 500 m chords
+  const NA = Math.max(w, h) > 6000 ? 80 : 48;
   const step = Math.max(w, h) / 72;
   const samples = [];
   let total = 0;
@@ -397,6 +398,16 @@ export function mapStats(m, cfg = DEFAULTS) {
     stages: m.levels.length, bridges, roadKm: Math.round(roadKm * 10) / 10, footprintKm2: footprint / 1e6,
     waterKm2: water / 1e6, parkKm2: parks / 1e6, kinds, specials,
   };
+}
+
+// Residents per building on sheets above population.autoCapKm2: the final stage holds about autoCap people at
+// scale 1 and every stage is thinned by the same factor. -> { factor (0..1], nominal (whole sheet), limited }
+export function popLimit(m, cfg = DEFAULTS) {
+  const pc = cfg.population, perM2 = pc.perM2, mul = pc.kindMul, cap = +pc.autoCap || 0;
+  let nominal = 0;
+  for (const b of m.buildings || []) nominal += polyArea(b.p) * perM2 * (mul[b.k] ?? 1);
+  const limited = cap > 0 && (m.w * m.h) / 1e6 > (+pc.autoCapKm2 || 0) && nominal > cap;
+  return { factor: limited ? cap / nominal : 1, nominal, limited };
 }
 
 export function emptyMap(w = 2000, h = 2000, name = 'Untitled') {

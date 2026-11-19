@@ -257,6 +257,6 @@ export function downloadItem(item) {
 
 export async function importFile(file) {
   if (!file) throw new Error('No file chosen');
-  if (file.size > 80 * 1024 * 1024) throw new Error('File is too large');
+  if (file.size > 160 * 1024 * 1024) throw new Error('File is too large');
   return importText(await file.text());
 }

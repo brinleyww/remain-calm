@@ -3,6 +3,7 @@
 import { getPalette, rgba, mix, hexToRgb, FONT_MONO } from './palette.js';
 import { drawProjectiles, drawEffects, drawAircraft, stampLabel, tag } from './fx.js';
 import { drawNavalGlyph, drawBoat, BOAT_TYPES } from './navalrender.js';
+import { TrainLayer } from './trains.js';
 import { hash2 } from '../util/rng.js';
 import { pointInPoly, polyBBox } from '../util/geom.js';
 
@@ -664,6 +665,8 @@ export class WorldRenderer {
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this._fire(ctx, world, cam);
+    if (!this.trains || this.trains.map !== world.map) this.trains = new TrainLayer(world.map);
+    this.trains.draw(ctx, world, cam, st, pal);
     this._zones(ctx, world, cam, pats, st);
     this._corridors(ctx, world, cam, pats);
     this._holds(ctx, world, cam);

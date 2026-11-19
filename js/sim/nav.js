@@ -263,9 +263,16 @@ function startScent(world, f, cost) {
   f.last = world.t;
 }
 
-// Big stages refresh the fields less often so the amortised cost stays flat.
+// Big stages refresh the fields less often so the amortised cost stays flat. Past a 5 km square (bigMul > 1) the
+// rates grow with the square root of the area, so residents and zombies still react in seconds; the population
+// cap keeps the agents' share of a tick flat there.
 function refreshEvery(world, base, perCells = 200000) {
-  return Math.max(base || 1, world.nav.regionCells / perCells);
+  return Math.max(base || 1, world.nav.regionCells / (perCells * bigMul(world)));
+}
+
+export function bigMul(world) {
+  const a = world.nav.regionCells * world.grid.cell * world.grid.cell;
+  return a > 25e6 ? Math.sqrt(a / 25e6) : 1;
 }
 
 // Computes every field synchronously (READY, restore, tests).
@@ -288,7 +295,7 @@ export function navSystem(world) {
   if (civ.job.active && !civ.urgent && civ.dirty) startCivField(world, true);
   else if (!civ.job.active && (civ.dirty || (world.counts[2] > 0 && world.t - civ.last >= civEvery))) startCivField(world, civ.dirty);
   if (civ.job.active) {
-    const budget = civ.urgent ? Math.max(12000, Math.min(26000, nav.regionCells >> 3)) : Math.max(6000, Math.ceil(nav.regionCells / Math.max(1, civEvery / dt * 0.6)));
+    const budget = civ.urgent ? Math.max(12000, Math.min(Math.round(26000 * bigMul(world)), nav.regionCells >> 3)) : Math.max(6000, Math.ceil(nav.regionCells / Math.max(1, civEvery / dt * 0.6)));
     if (civ.job.run(budget)) swap(civ);
   }
 

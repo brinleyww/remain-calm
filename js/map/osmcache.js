@@ -1,7 +1,7 @@
 // Raw OpenStreetMap downloads kept in IndexedDB (gzip when the browser can), so re-importing a square is instant.
 // Works in pages and workers; falls back to memory where IndexedDB is missing or blocked.
 const DB_NAME = 'remain-calm-osm', DB_VERSION = 1, META = 'meta', DATA = 'data';
-export const CACHE_LIMITS = { entries: 12, bytes: 150e6 };
+export const CACHE_LIMITS = { entries: 12, bytes: 400e6 };
 export const CACHE_VERSION = 'q2';
 
 export const cacheKey = (lat, lon, sizeKm) => `${CACHE_VERSION}:${(+lat).toFixed(4)},${(+lon).toFixed(4)}@${+sizeKm}`;
@@ -72,13 +72,21 @@ async function unpack(rec) {
   return new Response(new Blob([rec.v]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
 }
 
+// Elements are packed in chunks: a whole city in one JSON string could pass the browser's longest string.
+const CHUNK = 40000;
+
 // raw: { elements } as fetched. meta: { name, lat, lon, sizeKm, bytes }
 export async function cachePut(key, raw, meta = {}) {
   const st = await open();
-  const p = await pack(JSON.stringify({ elements: raw.elements, osm3s: raw.osm3s || null }));
+  const parts = [];
+  let bytes = 0, z = true;
+  for (let i = 0; i < raw.elements.length || !parts.length; i += CHUNK) {
+    const p = await pack(JSON.stringify(raw.elements.slice(i, i + CHUNK)));
+    parts.push(p.v); bytes += p.bytes; z = p.z;
+  }
   const m = { key, t: Date.now(), name: String(meta.name || '').slice(0, 80), lat: +meta.lat, lon: +meta.lon, sizeKm: +meta.sizeKm,
-    bytes: p.bytes, rawBytes: +meta.bytes || 0, n: raw.elements.length, stamp: (raw.osm3s && raw.osm3s.timestamp_osm_base) || '' };
-  await st.put(m, { z: p.z, v: p.v });
+    bytes, rawBytes: +meta.bytes || 0, n: raw.elements.length, stamp: (raw.osm3s && raw.osm3s.timestamp_osm_base) || '' };
+  await st.put(m, { z, parts, osm3s: raw.osm3s || null });
   await prune(st);
   return m;
 }
@@ -88,7 +96,12 @@ export async function cacheGet(key) {
   const rec = await st.get(key);
   if (!rec) return null;
   try {
-    const raw = JSON.parse(await unpack(rec));
+    let raw;
+    if (Array.isArray(rec.parts)) {
+      const elements = [];
+      for (const v of rec.parts) { const arr = JSON.parse(await unpack({ z: rec.z, v })); for (const e of arr) elements.push(e); }
+      raw = { elements, osm3s: rec.osm3s || null };
+    } else raw = JSON.parse(await unpack(rec));
     if (!raw || !Array.isArray(raw.elements)) throw new Error('bad entry');
     return raw;
   } catch (e) { await st.del(key).catch(() => {}); return null; }

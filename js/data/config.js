@@ -9,7 +9,9 @@ export const DEFAULTS = {
   // Nominal population (drives economy) = building footprint m2 * perM2 * kindMul.
   // Spawned civilians = nominal * scale (performance setting), capped by sim.maxAgents.
   // At scale 1 homes, shops and offices hold the reference 0.02 people per m2 of footprint.
-  population: { perM2: 0.02, scale: 1.0, kindMul: { res: 1, com: 1, ind: 0.5, civic: 0.8, trade: 0.9, armory: 0.5, rescue: 0.8, hazard: 0.2, landmark: 0.8 }, packSize: [2, 10], packSpread: 6 },
+  // Sheets larger than autoCapKm2 whose whole-map nominal exceeds autoCap spawn every stage at scale * autoCap / nominal.
+  population: { perM2: 0.02, scale: 1.0, kindMul: { res: 1, com: 1, ind: 0.5, civic: 0.8, trade: 0.9, armory: 0.5, rescue: 0.8, hazard: 0.2, landmark: 0.8 }, packSize: [2, 10], packSpread: 6,
+                autoCap: 120000, autoCapKm2: 25 },
 
   civ: { walk: 1.3, run: 2.0, panicRadius: 30, panicSpreadRadius: 14, panicSpreadChance: 0.3, panicSpreadMin: 0.8, panicThreshold: 0.5, calmDecayPerSec: 0.02,
          gateLureRadius: 350, broadcastRadius: 600, wander: 1.0, seekMaxPath: 8000, separation: 0.9,

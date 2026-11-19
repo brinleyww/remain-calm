@@ -1,7 +1,7 @@
 // Tiny synthesised sound effects (WebAudio, no files): dry gunfire ticks, thumps, blasts, sirens, typewriter clacks.
 
 const MIN_GAP = { shot: 55, thump: 70, explosion: 70, clack: 28, wall: 120, collapse: 160, mutant: 400, heli: 900, siren: 1500,
-  breach: 900, zap: 90, whoosh: 150, hiss: 200, snipe: 90, jet: 700, error: 120, place: 40, refund: 60, upgrade: 80, tick: 60, ready: 300, win: 2000, lose: 2000, nuke: 3000, alarm: 600, expand: 1500, stamp: 250, bell: 400 };
+  breach: 900, zap: 90, whoosh: 150, hiss: 200, snipe: 90, jet: 700, error: 120, place: 40, refund: 60, upgrade: 80, tick: 60, ready: 300, win: 2000, lose: 2000, nuke: 3000, alarm: 600, expand: 1500, stamp: 250, bell: 400, horn: 6000 };
 
 // Maps any sound name the simulation or combat code emits onto one of the synthesised voices.
 function voiceFor(name) {
@@ -324,6 +324,19 @@ export class Sfx {
     this._osc('sine', 2637, t, 1).connect(g);
     const g2 = this._env(out, t, 0.002, 0.08, 0.5);
     this._osc('sine', 3951, t, 0.6).connect(g2);
+  }
+
+  // A distant two-tone train horn as it pulls away from a station.
+  _horn(out, t) {
+    const g = this.ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.16, t + 0.06);
+    g.gain.setValueAtTime(0.16, t + 0.6);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.95);
+    g.connect(out);
+    const f = this._filter('lowpass', 1300, 0.7);
+    f.connect(g);
+    for (const hz of [311, 392]) this._osc('sawtooth', hz, t, 1).connect(f);
   }
 
   _ready(out, t) {

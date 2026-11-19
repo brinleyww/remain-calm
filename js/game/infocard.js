@@ -132,7 +132,11 @@ export class InfoCard {
     const name = s.combat.unitName(u.type);
     const lv = u.level || 1;
     const notches = Array.from({ length: 5 }, (_, k) => `<i class="${k < lv ? 'on' : ''}"></i>`).join('');
-    let o = this.head(name, `UNIT ${String(u.id).padStart(4, '0')}`, `<span class="rc-notches">${notches}</span> level ${lv} of 5`);
+    // several units on one roof (a crew and a demolition charge): "1 of 2" steps to the next
+    const roof = u.b >= 0 ? w.units.filter((q) => q && q.alive !== false && q.b === u.b) : [];
+    const k = roof.indexOf(u);
+    const step = roof.length > 1 ? ` ${btn('selunit', `${k + 1} of ${roof.length} &rsaquo;`, { arg: roof[(k + 1) % roof.length].id, cls: 'btn-ghost rc-step', title: 'Next unit on this building' })}` : '';
+    let o = this.head(name, `UNIT ${String(u.id).padStart(4, '0')}`, `<span class="rc-notches">${notches}</span> level ${lv} of 5${step}`);
     const st = s.combat.unitStats(w, u) || {};
     for (const [k, label, f] of STAT_ROWS) if (st[k] !== undefined && st[k] !== null && st[k] !== 0 && Number.isFinite(+st[k])) o += kv(label, f(st[k]));
     const inZone = u.b >= 0 ? w.buildingInZone(u.b) >= 0 : w.inZone(u.x, u.y) >= 0;

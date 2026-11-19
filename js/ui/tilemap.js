@@ -1,7 +1,7 @@
 // Area picker on OpenStreetMap raster tiles: drag the square (or the map), wheel or buttons to zoom.
 // Tiles load only for the visible view (light interactive use, per the tile usage policy).
 import { h } from './dom.js';
-import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL } from '../map/osm.js';
+import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL, TILE_KM } from '../map/osm.js';
 
 const TILE = 256, Z_MIN = 3, Z_MAX = 18;
 const TILE_URL = (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
@@ -15,10 +15,18 @@ const toLL = (x, y, z) => {
   return [Math.atan(Math.sinh(Math.PI * (1 - 2 * y / s))) * 180 / Math.PI, x / s * 360 - 180];
 };
 
-// tileMap({ lat, lon, sizeKm, onChange(lat, lon) }) -> { el, set({lat, lon, sizeKm, fit}), lock(on), destroy }
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+// tileMap({ lat, lon, sizeKm, onChange(lat, lon) }) -> { el, set({lat, lon, sizeKm, fit}), lock(on), parts(done), destroy }
+// A square bigger than one download part shows the parts it is fetched in; parts(done) shades the received ones
+// (indices as osm.planTiles orders them: rows from the south-west).
 export function tileMap({ lat = 51.5, lon = -0.12, sizeKm = 2, onChange = () => {}, label = 'Area map' } = {}) {
   const tiles = h('div.tmap-tiles');
-  const square = h('div.tmap-square', h('span.tmap-tag'));
+  const partsSvg = document.createElementNS(SVGNS, 'svg');
+  partsSvg.setAttribute('class', 'tmap-parts');
+  partsSvg.setAttribute('preserveAspectRatio', 'none');
+  partsSvg.setAttribute('aria-hidden', 'true');
+  const square = h('div.tmap-square', h('span.tmap-tag'), partsSvg);
   const scale = h('div.tmap-scale', h('i'), h('span'));
   const zin = h('button.tmap-zoom', { type: 'button', title: 'Zoom in', 'aria-label': 'Zoom in' }, '+');
   const zout = h('button.tmap-zoom', { type: 'button', title: 'Zoom out', 'aria-label': 'Zoom out' }, '−');
@@ -30,7 +38,7 @@ export function tileMap({ lat = 51.5, lon = -0.12, sizeKm = 2, onChange = () => 
     h('div.tmap-foot', coords, scale),
     h('a.tmap-attrib', { href: OSM_ATTRIBUTION_URL, target: '_blank', rel: 'noopener' }, OSM_ATTRIBUTION));
 
-  const st = { lat, lon, sizeKm, vlat: lat, vlon: lon, z: 14, shown: false, locked: false };
+  const st = { lat, lon, sizeKm, vlat: lat, vlon: lon, z: 14, shown: false, locked: false, partsKey: '', done: null };
   const imgs = new Map();
   let W = 0, H = 0, raf = 0;
 
@@ -70,13 +78,39 @@ export function tileMap({ lat = 51.5, lon = -0.12, sizeKm = 2, onChange = () => 
     const side = st.sizeKm * 1000 / mpp(st.lat, z);
     square.style.width = square.style.height = side + 'px';
     square.style.transform = `translate(${sx - tlx - side / 2}px, ${sy - tly - side / 2}px)`;
-    square.firstChild.textContent = `${st.sizeKm} km`;
+    const np = Math.max(1, Math.ceil(st.sizeKm / TILE_KM - 1e-9));
+    square.firstChild.textContent = np > 1 ? `${st.sizeKm} km · ${np * np} parts` : `${st.sizeKm} km`;
+    drawParts(np);
     coords.textContent = `${st.lat.toFixed(4)}, ${st.lon.toFixed(4)}`;
     const m = mpp(st.vlat, z), nice = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000].find(v => v / m >= 60) || 50000;
     scale.firstChild.style.width = Math.round(nice / m) + 'px';
     scale.lastChild.textContent = nice >= 1000 ? nice / 1000 + ' km' : nice + ' m';
   }
   const redraw = () => { if (!raf) raf = requestAnimationFrame(draw); };
+
+  function drawParts(np) {
+    const key = np + '|' + (st.done ? [...st.done].join(',') : '');
+    if (key === st.partsKey) return;
+    st.partsKey = key;
+    partsSvg.replaceChildren();
+    partsSvg.setAttribute('viewBox', `0 0 ${np} ${np}`);
+    if (np < 2) return;
+    if (st.done) for (const i of st.done) {
+      const r = document.createElementNS(SVGNS, 'rect');
+      r.setAttribute('x', String(i % np)); r.setAttribute('y', String(np - 1 - Math.floor(i / np)));
+      r.setAttribute('width', '1'); r.setAttribute('height', '1');
+      r.setAttribute('class', 'tmap-part-done');
+      partsSvg.appendChild(r);
+    }
+    for (let k = 1; k < np; k++) {
+      for (const [x1, y1, x2, y2] of [[k, 0, k, np], [0, k, np, k]]) {
+        const l = document.createElementNS(SVGNS, 'line');
+        l.setAttribute('x1', String(x1)); l.setAttribute('y1', String(y1)); l.setAttribute('x2', String(x2)); l.setAttribute('y2', String(y2));
+        l.setAttribute('vector-effect', 'non-scaling-stroke');
+        partsSvg.appendChild(l);
+      }
+    }
+  }
 
   function zoomAt(dz, px = W / 2, py = H / 2) {
     const z2 = Math.max(Z_MIN, Math.min(Z_MAX, st.z + dz));
@@ -177,6 +211,7 @@ export function tileMap({ lat = 51.5, lon = -0.12, sizeKm = 2, onChange = () => 
       redraw();
     },
     lock(on) { st.locked = !!on; el.classList.toggle('is-locked', st.locked); },
+    parts(done) { st.done = done && done.size ? new Set(done) : null; redraw(); },
     get centre() { return { lat: st.lat, lon: st.lon }; },
     get shown() { return st.shown; },
     redraw,

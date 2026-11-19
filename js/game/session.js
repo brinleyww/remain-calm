@@ -8,7 +8,7 @@ import { drawStatic, drawScaleBar, invalidate, invalidateBuilding, invalidateBri
 import { WorldRenderer } from '../render/worldrender.js';
 import { Expand } from '../render/expand.js';
 import { Markers, tag } from '../render/fx.js';
-import { pointInPoly, distToPolyline, polyCentroid } from '../util/geom.js';
+import { polyCentroid } from '../util/geom.js';
 import { KIND_LABEL, KIND_TAG } from '../map/format.js';
 import { HEIGHT_LABELS, heightClass } from '../render/palette.js';
 import { loadCombat } from './combatapi.js';
@@ -18,6 +18,8 @@ import { makeTool } from './tools.js';
 import { Hud } from './hud.js';
 import { InfoCard } from './infocard.js';
 import { Army } from './selection.js';
+import { pickList, selOf, anchorOf, TIP_SEC } from './pick.js';
+import { selectables } from '../sim/orders.js';
 import { showResult } from './results.js';
 import { openRefundPanel } from './refundpanel.js';
 import { showPause, showWelcome, showLoadoutPicker, showQuickSettings, openModal, button } from './overlays.js';
@@ -219,6 +221,7 @@ export class Session {
     this.input = new Input(this, this.canvas);
     this.input.attach();
     this.hud.log(`${(w.region && w.region.label) || 'Stage ' + (w.stage + 1)}: planning. ${fmtInt(w.stats.civStart)} residents in the district.`, 'info', 0);
+    if (w.popLimited) this.hud.log(`Large sheet: residents thinned to ${Math.max(1, Math.round(w.popFactor * 100))}% of the full count so it runs smoothly.`, 'info', 0);
   }
 
   bindWorld() {
@@ -462,6 +465,7 @@ export class Session {
     this.hud.rebuildSlots();
     const w = this.world;
     this.hud.log(`${w.region.label || 'Stage ' + (w.stage + 1)}: planning. ${fmtInt(w.stats.civStart)} residents, budget ${w.sandbox ? 'unlimited' : fmtMoney(w.budget.cap)}.`, 'info', 0);
+    if (w.popLimited) this.hud.log(`Large sheet: residents thinned to ${Math.max(1, Math.round(w.popFactor * 100))}% of the full count so it runs smoothly.`, 'info', 0);
     if (w.largeMap) this.largeMapBanner();
   }
 
@@ -666,55 +670,43 @@ export class Session {
     }
   }
 
-  // ---------------------------------------------------------------- picking
-  pickUnit(sx, sy, wx, wy, filter = null) {
-    const r = Math.max(4, 11 / this.cam.zoom);
-    const u = this.combat.unitAt(this.world, wx, wy, r);
-    if (!u || (filter && !filter(u))) return null;
-    if (this.world.owners > 1 && u.owner !== this.owner) return null;
-    return u;
+  // ---------------------------------------------------------------- picking (order and hit sizes: js/game/pick.js)
+  pickList(wx, wy, o = {}) {
+    const map = this.map;
+    return pickList(this.world, wx, wy, {
+      zoom: this.cam.zoom, owner: this.owner,
+      pickBuilding: (x, y, dead) => pickBuilding(map, x, y, dead), pickBridge: (x, y) => pickBridge(map, x, y, 3), ...o,
+    });
   }
 
-  pickAt(sx, sy, wx, wy) {
-    const w = this.world, z = this.cam.zoom, map = this.map;
-    const u = this.combat.unitAt(w, wx, wy, Math.max(4, 11 / z));
-    if (u) return { kind: 'unit', id: u.id };
-    const A = w.A;
-    const ai = w.nearest(wx, wy, Math.max(3, 7 / z), (1 << 4) | (1 << 5) | (1 << 6));
-    if (ai >= 0 && A.group[ai] >= 0) return { kind: 'squad', group: A.group[ai] };
-    for (const g of w.zones.gates) if (Math.hypot(g.x - wx, g.y - wy) * z <= 10) return { kind: 'gate', id: g.id };
-    for (const wl of w.walls) if (distToPolyline(wl.p, wx, wy) * z <= 7) return { kind: 'wall', id: wl.id };
-    const b = pickBuilding(map, wx, wy);
-    if (b >= 0) return { kind: 'building', b };
-    for (const co of w.corridors) if (corridorHit(co, wx, wy)) return { kind: 'corridor', id: co.id };
-    for (const ho of w.holds) if (Math.hypot(ho.x - wx, ho.y - wy) <= ho.R) return { kind: 'hold', id: ho.id };
-    const c = w.cellAt(wx, wy);
-    if (c >= 0 && w.zoneComp[c]) return { kind: 'zone', comp: w.zoneComp[c] - 1 };
-    const br = pickBridge(map, wx, wy, 3);
-    if (br && br.id >= 0) return { kind: 'bridge', id: br.id, road: br.road };
-    const deadB = pickBuilding(map, wx, wy, true);
-    if (deadB >= 0) return { kind: 'building', b: deadB };
-    return null;
+  // Own unit under the cursor (upgrade tool, garrison abilities); alt takes the next one.
+  pickUnit(sx, sy, wx, wy, filter = null, alt = false) {
+    const list = this.pickList(wx, wy, { units: true, mine: true, filter });
+    const c = list[alt && list.length > 1 ? 1 : 0];
+    return c ? this.world.units.find((u) => u && u.id === c.id) || null : null;
   }
 
-  // Placement under the cursor for the refund tool: { cmd, key, label, x, y, paid }.
-  pickPlacement(sx, sy, wx, wy) {
-    const w = this.world, z = this.cam.zoom;
-    const mine = (it) => w.owners < 2 || it.owner === this.owner;
-    const u = this.combat.unitAt(w, wx, wy, Math.max(4, 11 / z));
-    if (u && mine(u)) return { cmd: { t: 'unit.refund', id: u.id }, key: 'u' + u.id, label: this.combat.unitName(u.type), x: u.x, y: u.y, paid: u.paid };
-    for (const g of w.zones.gates) if (mine(g) && Math.hypot(g.x - wx, g.y - wy) * z <= 10) return { cmd: { t: 'gate.remove', id: g.id }, key: 'g' + g.id, label: 'gate', x: g.x, y: g.y, paid: g.paid };
-    for (const wl of w.walls) if (mine(wl) && distToPolyline(wl.p, wx, wy) * z <= 7) return { cmd: { t: 'wall.remove', id: wl.id }, key: 'w' + wl.id, label: 'wall', x: wx, y: wy, paid: wl.paid };
-    for (const co of w.corridors) if (mine(co) && corridorHit(co, wx, wy)) return { cmd: { t: 'corridor.remove', id: co.id }, key: 'c' + co.id, label: 'corridor', x: (co.x0 + co.x1) / 2, y: (co.y0 + co.y1) / 2, paid: co.paid };
-    for (const ho of w.holds) if (mine(ho) && Math.hypot(ho.x - wx, ho.y - wy) <= ho.R) return { cmd: { t: 'hold.remove', id: ho.id }, key: 'h' + ho.id, label: 'hold point', x: ho.x, y: ho.y, paid: ho.paid };
-    const polys = w.zones.polys;
-    for (let k = polys.length - 1; k >= 0; k--) {
-      const pl = polys[k];
-      if (!mine(pl) || !pointInPoly(pl.p, wx, wy)) continue;
-      const [cx, cy] = polyCentroid(pl.p);
-      return { cmd: { t: 'zone.remove', id: pl.id }, key: 'z' + pl.id, label: 'safe zone', x: cx, y: cy, paid: (pl.paid || 0) + (pl.upPaid || 0) };
+  pickAt(sx, sy, wx, wy) { return selOf(this.pickList(wx, wy)[0]); }
+
+  // Own placement under the cursor for the refund tool: { cmd, key, label, x, y, paid, hover }; alt takes the next one.
+  pickPlacement(sx, sy, wx, wy, alt = false) {
+    const w = this.world;
+    const list = this.pickList(wx, wy, { mine: true, troops: false, zonePolys: true });
+    const c = list[alt && list.length > 1 ? 1 : 0];
+    if (!c) return null;
+    const [x, y] = anchorOf(w, c, wx, wy);
+    const it = (c.kind === 'unit' ? w.units : c.kind === 'gate' ? w.zones.gates : c.kind === 'wall' ? w.walls : c.kind === 'corridor' ? w.corridors : c.kind === 'hold' ? w.holds : w.zones.polys)
+      .find((q) => q && q.id === c.id);
+    if (!it) return null;
+    const out = (t, label, paid = it.paid) => ({ cmd: { t, id: it.id }, key: c.key, label, x, y, paid, hover: c });
+    switch (c.kind) {
+      case 'unit': return out('unit.refund', this.combat.unitName(it.type));
+      case 'gate': return out('gate.remove', 'gate');
+      case 'wall': return out('wall.remove', 'wall');
+      case 'corridor': return out('corridor.remove', 'corridor');
+      case 'hold': return out('hold.remove', 'hold point');
+      default: return out('zone.remove', 'safe zone', (it.paid || 0) + (it.upPaid || 0));
     }
-    return null;
   }
 
   placementsInBox(x0, y0, x1, y1) {
@@ -736,20 +728,33 @@ export class Session {
 
   onHover(e) {
     this._hoverE = e;
-    this._hoverRt = this.rt;
-    if (!e) { this.hover = null; if (this.hud) this.hud.tooltip(null); }
+    if (!e) { this.hover = null; this._tip = null; if (this.hud) this.hud.tooltip(null); return; }
+    const a = this._hoverA;
+    if (!a || Math.hypot(e.sx - a.sx, e.sy - a.sy) > 3) { this._hoverA = { sx: e.sx, sy: e.sy }; this._hoverRt = this.rt; }
+    // at once, so the outline and the tooltip keep up with the pointer (a pick costs a few microseconds)
+    if (this.input && this.hud) this.updateHover();
   }
 
-  updateHover() {
+  // What a click would pick (outlined by Army.outline) and its tooltip. now: after a click, skip the debounce.
+  updateHover(now = false) {
     const e = this._hoverE;
-    if (!e || !this.input || this.input.pan || this.input.rpan || this.input.gesture || this.modalOpen()) { if (this.hud) this.hud.tooltip(null); return; }
+    if (!e || !this.input || this.input.pan || this.input.rpan || this.input.gesture || this.modalOpen()) { this.hover = null; this._tip = null; if (this.hud) this.hud.tooltip(null); return; }
     const cam = this.cam;
     e.wx = cam.x + e.sx / cam.zoom; e.wy = cam.y + e.sy / cam.zoom;
     if (cam.version !== this._hoverCamV) { this._hoverCamV = cam.version; this._hoverRt = this.rt; }
     const tn = this.toolName;
-    const w = this.world;
-    if (tn === 'select' || tn === 'refund' || tn === 'upgrade') this.hover = this.tool.drag ? null : this.pickAt(e.sx, e.sy, e.wx, e.wy);
-    else if (tn.startsWith('unit:')) {
+    const w = this.world, alt = !!this.input.alt;
+    let list = null, idx = -1;
+    if (tn === 'select') {
+      if (this.tool.drag || this.army.aim) this.hover = null;
+      else { list = this.pickList(e.wx, e.wy); idx = this.army.peek(e, list, alt); this.hover = list[idx] || null; }
+    } else if (tn === 'refund') {
+      const it = this.tool.box ? null : this.pickPlacement(e.sx, e.sy, e.wx, e.wy, alt);
+      this.hover = it ? it.hover : null;
+    } else if (tn === 'upgrade') {
+      const u = this.pickUnit(e.sx, e.sy, e.wx, e.wy, null, alt);
+      this.hover = u ? { kind: 'unit', id: u.id, b: u.b, key: 'u' + u.id } : null;
+    } else if (tn.startsWith('unit:')) {
       const c = w.cfg.units[tn.slice(5)] || {};
       const b = /building/.test(c.mount || '') ? pickBuilding(this.map, e.wx, e.wy) : -1;
       this.hover = b >= 0 ? { kind: 'building', b } : null;
@@ -757,12 +762,46 @@ export class Session {
       const b = /building/.test((w.cfg.abilities[tn.slice(8)] || {}).target || '') ? pickBuilding(this.map, e.wx, e.wy) : -1;
       this.hover = b >= 0 ? { kind: 'building', b } : null;
     } else this.hover = null;
-    const still = this.rt - this._hoverRt > 0.35;
-    if (tn === 'select' && still && this.hover && !(e.buttons & 1)) this.hud.tooltip(this.tooltipHtml(this.hover), e.sx, e.sy);
-    else this.hud.tooltip(null);
+    this.updateTip(e, list, idx, now);
   }
 
-  tooltipHtml(t) {
+  // The tooltip shows once the pointer rests TIP_SEC, then follows it while the target stays the same. A change the
+  // pointer did not cause (troops walking in and out of reach) must hold for two hover ticks, so it never flickers.
+  updateTip(e, list, idx, now) {
+    const tip = this._tip || (this._tip = { key: '', pend: '', html: '', t: 0, on: false });
+    const key = list && list[idx] ? `${list.map((c) => c.key).join(' ')}#${idx}` : '';
+    const still = this.rt - this._hoverRt >= TIP_SEC;
+    if (key !== tip.key) {
+      if (!now && still && tip.on && key !== tip.pend) { tip.pend = key; this.hud.tooltip(tip.html, e.sx, e.sy); return; }
+      tip.key = key; tip.pend = ''; tip.on = false; tip.html = key ? this.tipHtml(list, idx) : ''; tip.t = this.rt;
+    } else tip.pend = '';
+    if (!key || (!tip.on && !still)) { this.hud.tooltip(null); return; }
+    if (this.rt - tip.t > 0.5) { tip.html = this.tipHtml(list, idx); tip.t = this.rt; }
+    tip.on = true;
+    this.hud.tooltip(tip.html, e.sx, e.sy);
+  }
+
+  tipHtml(list, i) {
+    const sels = list.some((c) => c.kind === 'troop') ? selectables(this.world, this.owner) : [];
+    let o = this.tooltipHtml(list[i], sels);
+    if (list.length > 1) o += `<p class="rc-tip-more">Click again for <b>${esc(this.pickName(list[(i + 1) % list.length], sels))}</b>${list.length > 2 ? ` · ${i + 1} of ${list.length}` : ''}</p>`;
+    return o;
+  }
+
+  pickName(c, sels = []) {
+    const w = this.world, find = (l) => (l || []).find((q) => q && q.id === c.id);
+    switch (c.kind) {
+      case 'unit': { const u = find(w.units); return u ? this.combat.unitName(u.type) : 'Unit'; }
+      case 'troop': { const e = sels.find((q) => q.ref === c.ref); return e ? e.label : 'Squad'; }
+      case 'squad': return 'Armed group';
+      case 'building': { const b = w.buildings[c.b], m = this.map.buildings[c.b] || {}; return (m.name || (b && (b.use || KIND_LABEL[b.k])) || 'Building') + (b && !b.alive ? ' (collapsed)' : ''); }
+      case 'zone': return `Safe zone ${c.comp + 1}`;
+      case 'bridge': return (this.map.roads[c.road] || {}).name || 'Bridge';
+      default: return { gate: 'Gate', wall: 'Wall', corridor: 'Evac corridor', hold: 'Hold point', zonepoly: 'Safe zone' }[c.kind] || '';
+    }
+  }
+
+  tooltipHtml(t, sels = []) {
     const w = this.world;
     const kv = (k, v) => `<div class="kv"><span>${esc(k)}</span><i></i><b>${v}</b></div>`;
     if (t.kind === 'building') {
@@ -793,10 +832,15 @@ export class Session {
       return br ? `<p class="tooltip-title">${esc((this.map.roads[t.road] || {}).name || 'Bridge')}</p>${kv('Structural integrity', `${Math.round(br.hp / br.hpMax * 100)}%`)}${kv('Span', `${Math.round(br.len)} m`)}` : '';
     }
     if (t.kind === 'squad') return `<p class="tooltip-title">Armed group</p>${kv('Click', 'select')}${kv('Right-click', 'move there')}`;
+    if (t.kind === 'troop') {
+      const e = sels.find((q) => q.ref === t.ref);
+      return e ? `<p class="tooltip-title">${esc(e.label)}</p>${e.vehicle ? '' : kv('Men', fmtInt(e.n))}${kv('Click', 'select')}${kv('Right-click', 'move there')}` : '';
+    }
     if (t.kind === 'gate') { const g = w.zones.gates.find((q) => q.id === t.id); return g ? `<p class="tooltip-title">Gate</p>${kv('Integrity', `${Math.round(g.hp / g.hpMax * 100)}%`)}` : ''; }
     if (t.kind === 'corridor') return '<p class="tooltip-title">Evac corridor</p>';
     if (t.kind === 'hold') return '<p class="tooltip-title">Hold point</p>';
     if (t.kind === 'wall') return '<p class="tooltip-title">Wall</p>';
+    if (t.kind === 'zonepoly') return '<p class="tooltip-title">Safe zone</p>';
     return '';
   }
 
@@ -910,13 +954,16 @@ export class Session {
   render() {
     const w = this.world, ctx = this.ctx, dpr = this.dpr || 1, cam = this.cam, pal = this.pal;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const hb = this.hover && this.hover.kind === 'building' ? this.hover.b : null;
+    const hv = this.hover;
+    const hb = !hv ? null : hv.kind === 'building' || (hv.kind === 'unit' && hv.b >= 0) ? hv.b : hv.kind === 'bridge' ? { road: hv.road } : null;
     const ex = this.expand && this.expand.active ? this.expand : null;
     drawStatic(ctx, this.map, w.grid, cam, { palette: pal, view: this.view, stageMask: ex ? ex.mask() : w.region.poly, stageLine: !ex || ex.lineDone, budgetMs: ex ? 3 : undefined, world: w, hover: hb });
     const live = w.phase === 'battle' && !this.paused && !this.modalOpen();
     const ext = live ? (this.driver ? 0 : this.pacer.acc) : 0;
     const t = w.t + ext + (this.fxT || 0);
-    const flash = this.wr.draw(ex ? ex.beginWorld(ctx) : ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: this.hover, abilityName: (id) => this.combat.abilityName(id) });
+    const horn = this._horn || (this._horn = (x, y) => this.onSound({ name: 'horn', x, y, vol: 0.2 }));
+    const flash = this.wr.draw(ex ? ex.beginWorld(ctx) : ctx, w, cam, { dpr, ext, t, rt: this.rt, rings: this.rings, sel: this.sel, hover: null, abilityName: (id) => this.combat.abilityName(id),
+      trains: this.prefs.get().trains !== false, turn: this.driver ? this.driver.turn : null, hold: this.modalOpen(), horn });
     if (ex) ex.endWorld(ctx);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.army.draw(ctx, cam, pal);
@@ -936,11 +983,4 @@ export class Session {
       ctx.fillRect(0, 0, cam.w, cam.h);
     }
   }
-}
-
-function corridorHit(co, x, y) {
-  const dx = co.x1 - co.x0, dy = co.y1 - co.y0, L = Math.hypot(dx, dy) || 1;
-  const ux = dx / L, uy = dy / L, px = x - co.x0, py = y - co.y0;
-  const a = px * ux + py * uy, b = -px * uy + py * ux;
-  return a >= 0 && a <= L && Math.abs(b) <= co.w * 0.5;
 }

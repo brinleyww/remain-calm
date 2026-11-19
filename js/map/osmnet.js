@@ -20,6 +20,7 @@ export const NET = {
   backoffMs: [3000, 8000],
   roundCapMs: 30000,   // a round that took longer than this is not repeated
   cooldownMs: 180000,  // a failed mirror ranks last for this long
+  tileWaitMs: [15000, 30000, 45000], // a part of a big square that finds every server busy waits this long, then tries again
 };
 
 const health = new Map();
@@ -229,5 +230,6 @@ export async function fetchQuery(query, { signal, slots = makeSlots(NET.inFlight
   }
   const err = new Error('No map server could deliver the data. ' + (last ? last.message : ''));
   err.attempts = last && last.attempts;
+  err.busy = !!(last && last.busy);
   throw err;
 }

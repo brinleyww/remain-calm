@@ -354,7 +354,7 @@ export function startDialog(root, opts = {}) {
     const blankForm = () => {
       const name = el('input', { class: 'input', type: 'text', maxlength: 80, value: 'Untitled district', autofocus: true, dataset: { key: 'blank-name' } });
       const size = el('select', { class: 'select', value: '1000', dataset: { key: 'blank-size' } },
-        [[500, '0.5 × 0.5 km'], [1000, '1 × 1 km'], [1500, '1.5 × 1.5 km'], [2000, '2 × 2 km'], [3000, '3 × 3 km'], [4000, '4 × 4 km'], [5000, '5 × 5 km'], ['custom', 'Custom…']]
+        [[500, '0.5 × 0.5 km'], [1000, '1 × 1 km'], [1500, '1.5 × 1.5 km'], [2000, '2 × 2 km'], [3000, '3 × 3 km'], [4000, '4 × 4 km'], [5000, '5 × 5 km'], [8000, '8 × 8 km'], [10000, '10 × 10 km'], ['custom', 'Custom…']]
           .map(([v, t]) => el('option', { value: String(v) }, t)));
       const cw = el('input', { class: 'input', type: 'number', min: LIMITS.minSize, max: LIMITS.maxSize, step: 10, value: 1200, dataset: { key: 'blank-w' } });
       const ch = el('input', { class: 'input', type: 'number', min: LIMITS.minSize, max: LIMITS.maxSize, step: 10, value: 800, dataset: { key: 'blank-h' } });
@@ -377,7 +377,11 @@ export function startDialog(root, opts = {}) {
 
     const genForm = () => {
       const seed = el('input', { class: 'input', type: 'text', maxlength: 40, value: String((Math.random() * 1e6) | 0), dataset: { key: 'gen-seed' } });
-      const size = el('select', { class: 'select', value: '2', dataset: { key: 'gen-size' } }, [1, 1.5, 2, 3, 4, 5].map(v => el('option', { value: String(v) }, `${v} × ${v} km`)));
+      const size = el('select', { class: 'select', value: '2', dataset: { key: 'gen-size' } }, [1, 1.5, 2, 3, 4, 5, 6, 8, 10].map(v => el('option', { value: String(v) }, `${v} × ${v} km`)));
+      const sizeHint = el('div', { class: 'hint' });
+      const hintSize = () => { const v = +size.value; sizeHint.textContent = v > 5 ? `Takes ${v >= 8 ? 'up to ten' : 'a few'} seconds to draft; the crowd is thinned for speed in play.` : ''; };
+      size.addEventListener('change', hintSize);
+      hintSize();
       const water = el('select', { class: 'select', value: 'river', dataset: { key: 'gen-water' } }, WATER_TYPES.map(w => el('option', { value: w }, w[0].toUpperCase() + w.slice(1))));
       const dens = el('input', { class: 'slider', type: 'range', min: 0, max: 1, step: 0.05, value: 0.6, dataset: { key: 'gen-density' } });
       const bridges = el('input', { class: 'input', type: 'number', min: 0, max: 16, step: 1, value: 3, dataset: { key: 'gen-bridges' } });
@@ -388,13 +392,16 @@ export function startDialog(root, opts = {}) {
         b.textContent = 'Drafting…';
         await new Promise(r => setTimeout(r, 30));
         try {
-          const map = generateCity({ seed: seed.value.trim() || 1, sizeKm: +size.value, water: water.value, density: +dens.value, bridges: +bridges.value, stages: +stages.value });
-          finish({ map });
+          const opts = { seed: seed.value.trim() || 1, sizeKm: +size.value, water: water.value, density: +dens.value, bridges: +bridges.value, stages: +stages.value };
+          let map;
+          if (opts.sizeKm > 3) { try { map = await (await import('./gen.js')).generate(opts); } catch (x) { if (x && x.superseded) throw x; map = null; } }
+          if (done) return;
+          finish({ map: map || generateCity(opts) });
         } catch (x) { fail(x); b.disabled = false; b.textContent = 'Draft the city'; }
       };
       return el('div', { class: 'vstack gap-3' },
         el('p', { class: 'small', text: 'Start from a generated town and redraw it to taste.' }),
-        el('div', { class: 'ed-grid2' }, field('Seed', seed), field('Size', size), field('Water', water), field('Bridges', bridges), field('Density', dens), field('Stages', stages)),
+        el('div', { class: 'ed-grid2' }, field('Seed', seed), el('div', { class: 'field' }, el('label', { text: 'Size' }), size, sizeHint), field('Water', water), field('Bridges', bridges), field('Density', dens), field('Stages', stages)),
         el('div', { class: 'hstack' }, btn('Draft the city', go, 'btn btn-go', { dataset: { act: 'gen-go' } })));
     };
 

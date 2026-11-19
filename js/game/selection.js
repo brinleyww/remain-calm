@@ -5,10 +5,10 @@ import { h, setHTML, esc, fmtInt } from './el.js';
 import { selectables, marchPath } from '../sim/orders.js';
 import { rgba } from '../render/palette.js';
 import { tag } from '../render/fx.js';
+import { cycleIndex, selOf, AGAIN } from './pick.js';
 
 const TAU = Math.PI * 2;
 const POLICE = 4;
-const M_ARMED = (1 << 4) | (1 << 5) | (1 << 6);
 const ORDER_ACTIONS = { orderMove: 'move', orderHunt: 'hunt', orderHold: 'hold', orderReturn: 'return' };
 const ORDER_BTNS = [['orderMove', 'Move'], ['orderHunt', 'Hunt'], ['orderHold', 'Hold'], ['orderReturn', 'Back to zone']];
 const MODE_LABEL = { moving: 'moving', hunting: 'hunting', holding: 'holding', move: 'moving', hunt: 'hunting', hold: 'holding', return: 'going back' };
@@ -28,6 +28,8 @@ export class Army {
     this.box = null;
     this.aim = false;
     this.pings = [];
+    this.last = null;   // the last plain click: { sx, sy, t, key } of what it picked
+    this.undo = null;
     this._t = 0;
     this._acc = new Map();
     this.el = h('section.rc-army', { hidden: true });
@@ -39,7 +41,7 @@ export class Army {
     });
     const side = s.hud.el.side;
     side.insertBefore(this.el, s.hud.el.tally || null);
-    s._offs.push(s.world.events.on('changed', (e) => { if (e && (e.what === 'stage' || e.what === 'restore')) this.clear(); }));
+    s._offs.push(s.world.events.on('changed', (e) => { if (e && (e.what === 'stage' || e.what === 'restore')) { this.last = null; this.undo = null; this.clear(); } }));
   }
 
   get world() { return this.s.world; }
@@ -88,24 +90,15 @@ export class Army {
   }
 
   // ---------------------------------------------------------------- picking
-  // The own squad or commandable vehicle under the cursor: its ref, or null.
+  // The own squad or commandable vehicle (boats too) under the cursor: its ref, or null. Builds are ignored.
   pick(e) {
-    const w = this.world, z = this.s.cam.zoom;
     this.refresh();
-    let best = null, bd = Infinity;
-    const r = Math.max(3, 8 / z);
-    const i = w.nearest(e.wx, e.wy, r, M_ARMED);
-    if (i >= 0) {
-      const ref = 's' + w.A.group[i];
-      if (this.byRef.has(ref)) { best = ref; bd = Math.hypot(w.A.x[i] - e.wx, w.A.y[i] - e.wy); }
-    }
-    for (const v of this.list) {
-      if (!v.vehicle) continue;
-      const d = Math.hypot(v.x - e.wx, v.y - e.wy);
-      if (d <= Math.max(v.r, 10 / z) && d < bd) { bd = d; best = v.ref; }
-    }
-    return best;
+    const c = this.s.pickList(e.wx, e.wy, { builds: false, rest: false, boats: true }).find((q) => q.kind === 'troop' && this.byRef.has(q.ref));
+    return c ? c.ref : null;
   }
+
+  // Index in list a click at e would pick: clicking again on the spot steps on, Alt one further (game/pick.js).
+  peek(e, list, alt = !!e.alt) { return cycleIndex(list, this.last, e.sx, e.sy, performance.now() / 1000, alt); }
 
   // Refs of own squads with a member inside the world rectangle, and vehicles inside it; kind limits to one kind.
   inRect(x0, y0, x1, y1, kind = null) {
@@ -147,27 +140,62 @@ export class Army {
     this.click(e);
   }
 
+  // A plain click takes the build under the cursor before any troops; clicking again on the spot steps through
+  // everything there (builds, squads, the building, the zone...). Shift-click adds or drops troops only.
   click(e) {
     const s = this.s;
     if (this.aim) { this.aim = false; this.order('move', e.wx, e.wy); s.canvas.style.cursor = s.tool.cursor(); return; }
-    const ref = this.pick(e);
-    if (ref) {
-      if (e.shift && this.refs.has(ref)) { this.refs.delete(ref); this.changed(); s.sfx('clack'); return; }
-      // a boat is also a unit: its card (hull, upgrade, refund) opens too; before the outbreak only the card
+    if (e.shift) {
+      const ref = this.pick(e);
+      if (!ref) return;
+      if (this.refs.has(ref)) { this.refs.delete(ref); this.changed(); s.sfx('clack'); return; }
+      // boats take orders only once the outbreak starts
       const ent = this.byRef.get(ref), v = ent && ent.vehicle ? this.world.vehicles.find((q) => q && q.id === ent.id) : null;
-      const boat = v && v.boat && v.unit ? v.unit : null;
-      if (!boat || this.world.phase === 'battle') this.set([ref], e.shift);
-      if (boat && !e.shift) s.select({ kind: 'unit', id: boat.id });
+      if (!(v && v.boat) || this.world.phase === 'battle') this.set([ref], true);
       return;
     }
-    if (e.shift) return;
+    const list = s.pickList(e.wx, e.wy), t = performance.now() / 1000;
+    const i = this.peek(e, list), c = list[i] || null, prev = this.last;
+    this.undo = prev && c && prev.key !== c.key && Math.hypot(e.sx - prev.sx, e.sy - prev.sy) <= AGAIN.px && t - prev.t <= AGAIN.sec
+      ? { key: prev.key, sel: s.sel, refs: [...this.refs], t } : null;
+    this.last = c ? { sx: e.sx, sy: e.sy, t, key: c.key } : null;
+    this.choose(c);
+    s.updateHover(true);
+  }
+
+  choose(c) {
+    const s = this.s, w = this.world;
+    if (c && c.kind === 'troop') {
+      this.refresh();
+      if (this.byRef.has(c.ref)) { this.set([c.ref]); return; }
+    }
+    if (c && c.kind === 'unit') {
+      // a boat is also a unit: its card (hull, upgrade, refund) opens, and in battle it is selected for orders too
+      const u = w.units.find((q) => q && q.id === c.id), v = u && u.veh;
+      if (v && w.phase === 'battle') {
+        this.refresh();
+        if (this.byRef.has('v' + v.id)) { this.set(['v' + v.id]); s.select({ kind: 'unit', id: u.id }); return; }
+      }
+    }
     this.clear();
-    s.select(s.pickAt(e.sx, e.sy, e.wx, e.wy));
+    s.select(selOf(c));
   }
 
   dbl(e) {
     const ref = this.pick(e);
-    if (!ref) return;
+    if (!ref) {
+      // the second click of a double-click stepped on; with no troops here, go back to what the first one picked
+      const u = this.undo;
+      if (u && performance.now() / 1000 - u.t < 0.8) {
+        this.undo = null;
+        this.refs = new Set(u.refs);
+        this.changed();
+        this.s.select(u.sel);
+        if (this.last) this.last.key = u.key;
+        this.s.updateHover(true);
+      }
+      return;
+    }
     const ent = this.byRef.get(ref), bb = this.s.cam.visibleBBox(0);
     this.set(this.inRect(bb[0], bb[1], bb[2], bb[3], ent.kind), e.shift);
   }
@@ -297,9 +325,105 @@ export class Army {
     ctx.restore();
   }
 
+  // ---------------------------------------------------------------- hover outline
+  // What a click would pick, in ink with a paper halo like the map's building hover (buildings and bridges are outlined
+  // there). Selected gates and walls, which the world layer does not mark, get the selection colour.
+  outline(ctx, cam, pal, c, selected = false) {
+    const w = this.world, z = cam.zoom, ox = cam.x, oy = cam.y;
+    const X = (x) => (x - ox) * z, Y = (y) => (y - oy) * z;
+    const find = (list, id) => (list || []).find((q) => q && q.id === id);
+    const P = new Path2D();
+    let band = null, dash = false;
+    const ring = (x, y, r) => { P.moveTo(X(x) + r, Y(y)); P.arc(X(x), Y(y), r, 0, TAU); };
+    // rectangle around segment a-b: hw px either side, pad px past each end
+    const quad = (ax, ay, bx, by, hw, pad) => {
+      const sax = X(ax), say = Y(ay), sbx = X(bx), sby = Y(by), L = Math.hypot(sbx - sax, sby - say) || 1;
+      const ux = (sbx - sax) / L, uy = (sby - say) / L, nx = -uy * hw, ny = ux * hw;
+      const px = sax - ux * pad, py = say - uy * pad, qx = sbx + ux * pad, qy = sby + uy * pad;
+      P.moveTo(px + nx, py + ny); P.lineTo(qx + nx, qy + ny); P.lineTo(qx - nx, qy - ny); P.lineTo(px - nx, py - ny); P.closePath();
+    };
+    switch (c.kind) {
+      case 'unit': {
+        const u = find(w.units, c.id);
+        if (!u || u.alive === false) return;
+        if (u.veh) { ring(u.veh.x, u.veh.y, (u.veh.selR || 8) * z + 3); break; }
+        if (u.p) { band = u.p; break; }
+        const r = Math.max(4.5, Math.min(9, 4 + z * 2.2)) + 4;
+        P.rect(X(u.x) - r, Y(u.y) - r, 2 * r, 2 * r);
+        break;
+      }
+      case 'gate': {
+        const g = find(w.zones.gates, c.id);
+        if (!g) return;
+        const post = Math.max(Math.max(1.5, w.grid.cell * z * 1.05) * 0.5 + 1.5, 6 * z);
+        if (Number.isFinite(g.x0)) quad(g.x0, g.y0, g.x1, g.y1, post + 3, 4); else ring(g.x, g.y, 10);
+        break;
+      }
+      case 'wall': { const wl = find(w.walls, c.id); if (!wl) return; band = wl.p; break; }
+      case 'corridor': { const co = find(w.corridors, c.id); if (!co) return; quad(co.x0, co.y0, co.x1, co.y1, Math.max(4, co.w * z / 2), 0); break; }
+      case 'hold': { const h = find(w.holds, c.id); if (!h) return; ring(h.x, h.y, Math.max(8, h.R * z)); break; }
+      case 'zone': {
+        const wr = this.s.wr, e = wr.comps && wr.comps.find((q) => q.c.id === c.comp);
+        if (!e) return;
+        P.addPath(wr._compPath(e.polys, e.loops, cam)); dash = true;
+        break;
+      }
+      case 'zonepoly': {
+        const pl = find(w.zones.polys, c.id);
+        if (!pl) return;
+        const p = pl.p;
+        P.moveTo(X(p[0]), Y(p[1])); for (let k = 2; k < p.length; k += 2) P.lineTo(X(p[k]), Y(p[k + 1])); P.closePath(); dash = true;
+        break;
+      }
+      case 'troop': case 'squad': {
+        if (c.vid !== undefined) { const v = w.vehicles.find((q) => q && q.id === c.vid); if (v) ring(v.x, v.y, (v.selR || 8) * z + 3); break; }
+        this.groupRings(P, cam, c.group);
+        break;
+      }
+      default: return;
+    }
+    const col = selected ? pal.select : pal.hover;
+    ctx.save();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    if (band) {
+      const B = new Path2D();
+      B.moveTo(X(band[0]), Y(band[1])); for (let k = 2; k < band.length; k += 2) B.lineTo(X(band[k]), Y(band[k + 1]));
+      ctx.globalAlpha = 0.3; ctx.strokeStyle = col; ctx.lineWidth = Math.max(8, w.grid.cell * z * 1.05 + 7); ctx.stroke(B);
+      ctx.globalAlpha = 1;
+    }
+    if (dash) ctx.setLineDash([6, 4]);
+    if (!selected) { ctx.strokeStyle = pal.hoverHalo; ctx.lineWidth = 4; ctx.stroke(P); }
+    ctx.strokeStyle = col; ctx.lineWidth = selected ? 2 : 1.8; ctx.stroke(P);
+    ctx.restore();
+  }
+
+  // Rings round each member of group g on screen, or one ring round the whole group when zoomed out.
+  groupRings(P, cam, g) {
+    const A = this.world.A, z = cam.zoom, ox = cam.x, oy = cam.y, W = cam.w, H = cam.h;
+    let n = 0, sx = 0, sy = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const r = Math.max(3.4, 0.8 * z + 2.2) + 1, each = z >= MEMBER_RING_ZOOM;
+    for (let i = 0, N = A.n; i < N; i++) {
+      if (A.type[i] < POLICE || A.group[i] !== g) continue;
+      const x = A.x[i], y = A.y[i];
+      if (each) {
+        const px = (x - ox) * z, py = (y - oy) * z;
+        if (px < -r || py < -r || px > W + r || py > H + r) continue;
+        P.moveTo(px + r, py); P.arc(px, py, r, 0, TAU);
+        continue;
+      }
+      n++; sx += x; sy += y;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    if (!n) return;
+    const cx = sx / n, cy = sy / n, R = Math.max(7, (Math.max(x1 - cx, cx - x0, y1 - cy, cy - y0) + 3) * z + 1);
+    P.moveTo((cx - ox) * z + R, (cy - oy) * z); P.arc((cx - ox) * z, (cy - oy) * z, R, 0, TAU);
+  }
+
   draw(ctx, cam, pal) {
     this.frame();
     const s = this.s, w = this.world, rt = s.rt;
+    if (s.hover) this.outline(ctx, cam, pal, s.hover);
+    if (s.sel && (s.sel.kind === 'gate' || s.sel.kind === 'wall')) this.outline(ctx, cam, pal, s.sel, true);
     this.pings = this.pings.filter((p) => rt - p.rt0 < 1.4);
     if (!this.refs.size && !this.pings.length) return;
     const z = cam.zoom, ox = cam.x, oy = cam.y, W = cam.w, H = cam.h, col = pal.select, A = w.A;

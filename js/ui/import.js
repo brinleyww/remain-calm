@@ -1,19 +1,24 @@
 // Real-place import: search a place (or load a saved export), set the square on a map, fetch, convert, file it.
-import { searchPlaces, IMPORT_RANGE, OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL, isHugeMap, snapSize, roundCoord } from '../map/osm.js';
+import { searchPlaces, IMPORT_RANGE, OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL, isHugeMap, snapSize, roundCoord, tileCount } from '../map/osm.js';
 import { cacheList, cacheKey } from '../map/osmcache.js';
-import { mapStats } from '../map/format.js';
+import { mapStats, popLimit } from '../map/format.js';
 import { saveItem } from '../map/library.js';
 import { getSettings } from '../meta/settings.js';
 import { h, clear, sfx, fmtInt, toast } from './dom.js';
 import { segControl, field, slider } from './screen.js';
 import { importArea } from './gen.js';
-import { mapPreview, mapFacts, civEstimate, stagePopulations } from './mapinfo.js';
+import { mapPreview, mapFacts, civEstimate, crowdLine, stagePopulations } from './mapinfo.js';
 import { tileMap } from './tilemap.js';
 
 const fmtBytes = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' kB' : (n | 0) + ' B');
 const fmtSec = ms => (ms < 950 ? (ms / 1000).toFixed(1) : String(Math.round(ms / 1000))) + ' s';
 const host = url => { try { return new URL(url).host; } catch (e) { return 'the map server'; } };
-const sizeHint = s => (s >= 3.5 ? 'A big sheet: dense city centres take a while to fetch and can run slowly.' : s >= 2.5 ? 'A large district. Fetched in four parts.' : s >= 1.5 ? 'A town centre or a few neighbourhoods.' : 'A few blocks. Quick to fetch and to play.');
+const sizeHint = s => {
+  const n = tileCount(s);
+  if (s > 5) return `A whole city, fetched in ${n} parts: about ${s >= 8 ? '1–3 minutes' : 'a minute or two'} to fetch and draw, longer when the servers are busy. The crowd is thinned so it runs smoothly.`;
+  if (s >= 4.5) return `A big sheet in ${n} parts: dense city centres take a minute or so to fetch.`;
+  return s >= 3.5 ? 'A big sheet: dense city centres take a while to fetch and can run slowly.' : s >= 2.5 ? 'A large district. Fetched in four parts.' : s >= 1.5 ? 'A town centre or a few neighbourhoods.' : 'A few blocks. Quick to fetch and to play.';
+};
 
 let memo = { query: '', results: [], pick: -1, size: 2, stages: 5, name: '', centre: null, map: null, res: null, saved: false, view: 'area', file: null };
 
@@ -240,6 +245,7 @@ export function mountImport(container, { onMap }) {
       case 'parse': return `Reading the data${part}…`;
       case 'retry': return `${host(p.endpoint)}: ${p.error}. Trying another server…`;
       case 'backoff': return `Every server is busy. Trying again in ${Math.round(p.wait / 1000)} s…`;
+      case 'partwait': return `Every server is busy${part}. That part waits ${Math.round(p.wait / 1000)} s and asks again; the rest carry on…`;
       case 'tile': return p.tilesDone < p.tiles ? `Part ${p.tilesDone} of ${p.tiles} received.` : 'All parts received.';
       case 'cache': return 'Found in this browser’s cache. No download needed.';
       case 'read': return 'Reading the file…';
@@ -275,10 +281,13 @@ export function mountImport(container, { onMap }) {
     meter.style.setProperty('--v', 0.03);
     phase.textContent = args.file ? 'Reading the file…' : 'Starting…';
     detail.textContent = '';
+    const partsDone = new Set();
+    area.parts(null);
     try {
       const res = await importArea(args, {
         signal: ctl.signal,
         onProgress: (p) => {
+          if (p.phase === 'tile' && p.tiles > 1) { partsDone.add(p.tile); area.parts(partsDone); }
           const t = phaseText(p);
           if (t) phase.textContent = t;
           if (p.totalBytes !== undefined) detail.textContent = `${fmtBytes(p.totalBytes)} received${p.tiles > 1 ? ` · ${p.tilesDone} of ${p.tiles} parts done` : ''}`;
@@ -293,6 +302,7 @@ export function mountImport(container, { onMap }) {
       memo.res = res;
       memo.map = res.map;
       memo.saved = false;
+      area.parts(null);
       if (res.lat !== undefined) memo.centre = { lat: res.lat, lon: res.lon };
       if (args.file) { area.set({ lat: res.lat, lon: res.lon, sizeKm: res.sizeKm, fit: true }); area.lock(true); memo.size = res.sizeKm; sizeS.set(res.sizeKm); }
       if (args.file && name.dataset.auto !== '0') { name.value = memo.name = res.map.name; name.dataset.auto = '1'; }
@@ -334,12 +344,14 @@ export function mountImport(container, { onMap }) {
     const stats = mapStats(m);
     const facts = mapFacts(m, stats);
     const popScale = getSettings().popScale;
-    const stage1 = civEstimate(stagePopulations(m)[0] || 0, popScale).n;
-    const civ = civEstimate(stats.nominalPop, popScale);
+    const lim = popLimit(m);
+    const stage1 = civEstimate(stagePopulations(m)[0] || 0, popScale, undefined, lim.factor).n;
+    const civ = civEstimate(stats.nominalPop, popScale, undefined, lim.factor);
     facts.append(
       h('div.kv', h('span', 'Stage 1 residents'), h('i'), h('b', fmtInt(stage1))),
       h('div.kv', h('span', 'People simulated, final stage'), h('i'), h('b', fmtInt(civ.n) + (civ.capped ? ' (capped)' : ''))));
     factsBox.appendChild(facts);
+    if (lim.limited) factsBox.appendChild(h('p.tiny.muted', crowdLine(m, popScale) + '.'));
     if (res && res.info) {
       const i = res.info;
       sourceLine.textContent = res.source === 'cache' ? 'From this browser’s cache, fetched earlier. Download again for fresh data.'

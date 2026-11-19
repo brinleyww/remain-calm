@@ -1,6 +1,7 @@
 // Map facts the shell shows before a session exists: record keys, stage populations, budget and SP estimates,
 // and the minimap preview widget.
 import { DEFAULTS } from '../data/config.js';
+import { popLimit } from '../map/format.js';
 import { polyArea, polyBBox, pointInPoly } from '../util/geom.js';
 import { hashStr } from '../util/rng.js';
 import { drawMinimap } from '../render/maprender.js';
@@ -80,10 +81,30 @@ export function fitLoadout(loadout, { spCap = Infinity, unlocked = null, cfg = D
   return { units, abilities };
 }
 
-export function civEstimate(C, popScale, cfg = DEFAULTS) {
-  const n = Math.round(C * popScale);
+// factor: the big-sheet thinning from popLimit(map, cfg) (1 = none).
+export function civEstimate(C, popScale, cfg = DEFAULTS, factor = 1) {
+  const n = Math.round(C * popScale * factor);
   return { n: Math.min(n, cfg.sim.maxAgents), capped: n > cfg.sim.maxAgents };
 }
+
+// What the final stage will hold: { n, capped, limited, factor, full } (full = people without the big-sheet limit).
+export function crowdEstimate(map, popScale, cfg = DEFAULTS) {
+  const lim = popLimit(map, cfg);
+  const civ = civEstimate(lim.nominal, popScale, cfg, lim.factor);
+  return { ...civ, limited: lim.limited, factor: lim.factor, full: Math.round(lim.nominal * popScale) };
+}
+
+// One line for size pickers: "8 km · about 140,000 residents at the final stage · population limited for speed".
+export function crowdLine(map, popScale, cfg = DEFAULTS) {
+  const c = crowdEstimate(map, popScale, cfg);
+  const km = Math.max(map.w, map.h) / 1000;
+  const parts = [`${km % 1 ? km.toFixed(1) : km} km`, `about ${fmtInt(roundSig(c.n))} residents at the final stage`];
+  if (c.limited) parts.push('population limited for speed');
+  else if (c.capped) parts.push('crowd capped');
+  return parts.join(' · ');
+}
+
+const roundSig = n => (n >= 10000 ? Math.round(n / 1000) * 1000 : n >= 1000 ? Math.round(n / 100) * 100 : n);
 
 export const WATER_LABEL = { none: 'Inland', river: 'River', coast: 'Coast', lake: 'Lake', islands: 'Islands' };
 

@@ -49,6 +49,7 @@ function normalise(s) {
     uiScale: Math.max(0.7, Math.min(1.6, num(s.uiScale, 1))),
     edgePan: !!s.edgePan,
     reduceMotion: !!s.reduceMotion,
+    trains: s.trains !== false,
     palette: typeof s.palette === 'string' ? s.palette : 'auto',
     keys: s.keys && typeof s.keys === 'object' ? s.keys : DEFAULT_KEYS,
   };

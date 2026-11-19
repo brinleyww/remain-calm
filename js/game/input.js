@@ -20,6 +20,7 @@ export class Input {
     this.rpan = null;
     this.gesture = null;
     this.mouse = null;
+    this.alt = false;
     this._h = {};
   }
 
@@ -44,7 +45,7 @@ export class Input {
     h.ctx = (e) => e.preventDefault();
     h.key = (e) => this.onKey(e);
     h.keyup = (e) => this.onKeyUp(e);
-    h.blur = () => this.held.clear();
+    h.blur = () => { this.held.clear(); this.setAlt(false); };
     el.addEventListener('pointerdown', h.down);
     el.addEventListener('pointermove', h.move);
     el.addEventListener('pointerup', h.up);
@@ -96,6 +97,7 @@ export class Input {
   onMove(e) {
     const ev = this.ev(e);
     this.mouse = ev;
+    this.alt = ev.alt;
     if (this.pan) { this.s.cam.pan(ev.sx - this.pan.x, ev.sy - this.pan.y); this.pan = { x: ev.sx, y: ev.sy }; return; }
     if (this.rpan) {
       if (!this.rpan.moved && Math.hypot(ev.sx - this.rpan.x, ev.sy - this.rpan.y) > 4) this.rpan.moved = true;
@@ -131,8 +133,16 @@ export class Input {
     this.s.cam.wheel(e.deltaY, ev.sx, ev.sy, e.deltaMode);
   }
 
+  // Alt held: a click picks the next thing under the cursor (game/pick.js). Its default would move focus to the
+  // browser's menu on some systems.
+  setAlt(on) {
+    this.alt = on;
+    if (this.mouse) this.mouse.alt = on;
+  }
+
   onKey(e) {
     if (typingInto(e.target) || this.s.externalOverlay()) return;
+    if (e.key === 'Alt') { this.setAlt(true); e.preventDefault(); return; }
     this.s.userGesture();
     if (this.s.modalKey(e)) { e.preventDefault(); return; }
     if (e.code === 'Backspace' || e.code === 'Delete') { if (this.s.tool.key('backspace')) e.preventDefault(); return; }
@@ -158,7 +168,10 @@ export class Input {
     if (handled) e.preventDefault();
   }
 
-  onKeyUp(e) { this.held.delete(e.code); }
+  onKeyUp(e) {
+    this.held.delete(e.code);
+    if (e.key === 'Alt') { this.setAlt(false); if (!typingInto(e.target)) e.preventDefault(); }
+  }
 
   update(dt) {
     let dx = 0, dy = 0;

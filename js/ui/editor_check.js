@@ -1,6 +1,6 @@
 // Map checks for the editor: format validation plus playability rules (nested stages, civilians per stage,
 // bridges over water). Every issue can point at a place on the sheet and at the item that caused it.
-import { validateMap, normalizeMap, LIMITS } from '../map/format.js';
+import { validateMap, normalizeMap, LIMITS, popLimit } from '../map/format.js';
 import { polyArea, polyCentroid, pointInPoly, polyBBox } from '../util/geom.js';
 import { DEFAULTS } from '../data/config.js';
 import { itemCentre } from './editor_model.js';
@@ -34,7 +34,7 @@ function waterLookup(map) {
 // Per-stage facts used by the Stages list and the checks.
 export function stageInfo(map, cfg = DEFAULTS) {
   const levels = map.levels || [];
-  const perM2 = cfg.population.perM2, mul = cfg.population.kindMul, scale = cfg.population.scale;
+  const perM2 = cfg.population.perM2, mul = cfg.population.kindMul, scale = cfg.population.scale * popLimit(map, cfg).factor;
   const cents = map.buildings.map(b => polyCentroid(b.p));
   const areas = map.buildings.map(b => polyArea(b.p));
   const inside = new Uint8Array(map.buildings.length);
@@ -140,7 +140,7 @@ export function checkMap(map, cfg = DEFAULTS) {
   }
   if (!map.roads.length && map.buildings.length) W('There are no roads: civilians and zombies will cross open ground', null, null);
   if (!map.buildings.length) E('The map has no buildings', null, null);
-  if (map.buildings.length > 30000 || map.roads.length > 16000) W(`Large map (${map.buildings.length.toLocaleString()} buildings): it may run slowly`, null, null);
+  if (map.buildings.length > 90000 || map.roads.length > 50000) W(`Large map (${map.buildings.length.toLocaleString()} buildings): it needs a desktop with plenty of memory`, null, null);
   map.spawns.forEach((s, i) => {
     if (n && !pointInPoly(map.levels[n - 1].p, s[0], s[1])) W(`Outbreak point ${i + 1} lies outside every stage`, s, { coll: 'spawns', idx: i });
   });

@@ -6,6 +6,7 @@ import { polyCentroid, polySignedArea, pointInPoly, distToPolyline, clamp } from
 import { hash2, mulberry32 } from '../util/rng.js';
 import { T, ROAD_WIDTH, clipPolyRect } from '../map/format.js';
 import { getPalette, heightClass, mix, SPECIAL_CODES, FONT_MONO, FONT_LABEL, BUILDING_KIND_ORDER } from './palette.js';
+import { drawRails } from './raildraw.js';
 
 const TILE = 256;
 const IDX = 128;
@@ -708,7 +709,7 @@ class StaticCache {
     let cur = null;
     for (const r of list) {
       const k = rk[r];
-      if (k === RK.bridge) continue;
+      if (k === RK.bridge || k === RK.rail) continue;
       if (!cur || cur.k !== k || cur.w !== rw[r]) { cur = { k, w: rw[r], path: new Path2D() }; groups.push(cur); }
       const p = R[r].p;
       if (p.length >= 4) lineTo(cur.path, p);
@@ -739,20 +740,7 @@ class StaticCache {
       ctx.strokeStyle = g.k === RK.major ? pal.majorRoad : pal.road;
       ctx.stroke(g.path);
     }
-    for (const g of groups) {
-      if (g.k !== RK.rail) continue;
-      const w = Math.max(g.w * S * 0.75, 3.6 * px);
-      ctx.lineCap = 'butt';
-      ctx.lineWidth = w * u;
-      ctx.strokeStyle = pal.rail;
-      ctx.stroke(g.path);
-      ctx.lineWidth = Math.max(1 * px, w - 2.2 * px) * u;
-      ctx.strokeStyle = pal.railGap;
-      ctx.setLineDash([7 * px * u, 7 * px * u]);
-      ctx.stroke(g.path);
-      ctx.setLineDash([]);
-      ctx.lineCap = 'round';
-    }
+    drawRails(ctx, this, list, S, ox, oy, qx0, qy0, qx1, qy1);
   }
 
   _bridges(ctx, S, ox, oy, qx0, qy0, qx1, qy1) {
@@ -1528,11 +1516,13 @@ export function drawMinimap(ctx, map, w, h, opts = {}) {
   const key = `${w}x${h}@${dpr}|${pal.name}|${polyKey(typeof stageRaw === 'number' ? stageRaw : sm)}`;
   let mm = cache.minimap;
   const t = now();
-  if (!mm || mm.key !== key || (mm.version !== cache.version && t - mm.t > 400)) {
+  // damage redraws wait at least 40 times as long as the last redraw took (big sheets: about a second)
+  if (!mm || mm.key !== key || (mm.version !== cache.version && t - mm.t > Math.max(400, (mm.ms || 0) * 40))) {
     mm = cache.minimap = renderMinimap(map, cache, pal, w, h, dpr, T, sm);
     mm.key = key;
     mm.version = cache.version;
-    mm.t = t;
+    mm.t = now();
+    mm.ms = mm.t - t;
   }
   ctx.drawImage(mm.canvas, 0, 0, w, h);
   if (opts.camera) {

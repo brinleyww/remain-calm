@@ -121,7 +121,8 @@ export function buildSettings({ inGame = false } = {}) {
       h('div.vstack.gap-4',
         field('Interface scale', ui.el, 'Resizes every menu and the battle HUD.'),
         field('Print preset', pal.el, '"Map default" uses each map’s own colours in battle and paper in the menus.'),
-        tog('reduceMotion', 'Reduce motion', 'Skips typewriter and stamp animations.')));
+        tog('reduceMotion', 'Reduce motion', 'Skips typewriter and stamp animations.'),
+        tog('trains', 'Trains on the railways', 'For show only: they never stop residents or the infected.')));
   }
 
   function simTab() {
@@ -143,6 +144,7 @@ export function buildSettings({ inGame = false } = {}) {
       h('div.vstack.gap-3',
         field('Population scale', pop.el, 'How many residents appear as people. Money and score use the full population either way.'),
         note,
+        h('p.tiny.muted', `Sheets bigger than ${Math.round(Math.sqrt(DEFAULTS.population.autoCapKm2))} km square are thinned so their final stage holds about ${fmtInt(DEFAULTS.population.autoCap)} people at 100%. This scale multiplies that too, up to ${fmtInt(DEFAULTS.sim.maxAgents)}: higher settings on a big sheet are at your own risk.`),
         inGame ? h('p.tiny.faint', 'A new population scale applies from the next exercise.') : null),
       h('div.vstack.gap-4',
         tog('autoPauseOnOutbreak', 'Pause when the outbreak starts', 'Gives you a moment to read the map after READY.'),

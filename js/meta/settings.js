@@ -67,6 +67,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   palette: 'auto',    // 'auto' = paper in menus, the map's own preset in game
   edgePan: false,
   reduceMotion: false,
+  trains: true,       // decorative trains on the railways
 });
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -83,7 +84,7 @@ function sanitize(raw) {
   s.sfxVolume = num(raw.sfxVolume, s.sfxVolume, 0, 1);
   s.popScale = num(raw.popScale, s.popScale, POP_SCALE_RANGE[0], POP_SCALE_RANGE[1]);
   s.uiScale = num(raw.uiScale, s.uiScale, UI_SCALE_RANGE[0], UI_SCALE_RANGE[1]);
-  for (const b of ['uiSounds', 'autoPauseOnOutbreak', 'showTips', 'edgePan', 'reduceMotion']) if (typeof raw[b] === 'boolean') s[b] = raw[b];
+  for (const b of ['uiSounds', 'autoPauseOnOutbreak', 'showTips', 'edgePan', 'reduceMotion', 'trains']) if (typeof raw[b] === 'boolean') s[b] = raw[b];
   if (PALETTE_CHOICES.includes(raw.palette)) s.palette = raw.palette;
   if (raw.keys && typeof raw.keys === 'object') {
     for (const a of ACTIONS) {
