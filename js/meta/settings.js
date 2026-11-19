@@ -69,6 +69,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   edgePan: false,
   reduceMotion: false,
   trains: true,       // decorative trains on the railways
+  thinCrowds: true,   // big sheets spawn at most population.autoCap residents
 });
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -85,7 +86,7 @@ function sanitize(raw) {
   s.sfxVolume = num(raw.sfxVolume, s.sfxVolume, 0, 1);
   s.popScale = num(raw.popScale, s.popScale, POP_SCALE_RANGE[0], POP_SCALE_RANGE[1]);
   s.uiScale = num(raw.uiScale, s.uiScale, UI_SCALE_RANGE[0], UI_SCALE_RANGE[1]);
-  for (const b of ['uiSounds', 'autoPauseOnOutbreak', 'showTips', 'edgePan', 'reduceMotion', 'trains']) if (typeof raw[b] === 'boolean') s[b] = raw[b];
+  for (const b of ['uiSounds', 'autoPauseOnOutbreak', 'showTips', 'edgePan', 'reduceMotion', 'trains', 'thinCrowds']) if (typeof raw[b] === 'boolean') s[b] = raw[b];
   if (PALETTE_CHOICES.includes(raw.palette)) s.palette = raw.palette;
   if (raw.keys && typeof raw.keys === 'object') {
     for (const a of ACTIONS) {
@@ -231,6 +232,12 @@ export function primaryKeyLabel(action) { return keyLabel(keysFor(action)[0] || 
 // ------------------------------------------------------------ derived values
 
 export function popScaleMutator(scale = state.popScale) { return `population.scale=${+(+scale).toFixed(3)}`; }
+
+export const FULL_CROWD_MAX = 500000;
+// Config lines for the crowd settings: the population scale and, with thinning off, no big-sheet cap and a higher ceiling.
+export function crowdMutators(s = state) {
+  return [popScaleMutator(s.popScale), ...(s.thinCrowds === false ? ['population.autoCap=0', `sim.maxAgents=${FULL_CROWD_MAX}`] : [])];
+}
 
 // Shell display: UI scale and the menu print preset. 'auto' prints menus on paper.
 // In game pass { palette: false } so the map's own preset stays on the page.

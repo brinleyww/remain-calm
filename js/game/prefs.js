@@ -50,6 +50,7 @@ function normalise(s) {
     edgePan: !!s.edgePan,
     reduceMotion: !!s.reduceMotion,
     trains: s.trains !== false,
+    thinCrowds: s.thinCrowds !== false,
     palette: typeof s.palette === 'string' ? s.palette : 'auto',
     keys: s.keys && typeof s.keys === 'object' ? s.keys : DEFAULT_KEYS,
   };

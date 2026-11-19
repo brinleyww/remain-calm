@@ -1,7 +1,7 @@
 // Settings: key bindings with conflict check, sound, display, simulation scale, and progress reset.
 import {
   ACTIONS, getSettings, updateSettings, resetSettings, keysFor, bindKey, eventToKey, keyLabel, actionLabel, findConflicts,
-  isModifierCode, PALETTE_CHOICES, POP_SCALE_RANGE, UI_SCALE_RANGE, applyDisplaySettings,
+  isModifierCode, PALETTE_CHOICES, POP_SCALE_RANGE, UI_SCALE_RANGE, applyDisplaySettings, FULL_CROWD_MAX,
 } from '../meta/settings.js';
 import { resetProgress, unlockAll, getProgress } from '../meta/progress.js';
 import { DEFAULTS } from '../data/config.js';
@@ -145,6 +145,7 @@ export function buildSettings({ inGame = false } = {}) {
         field('Population scale', pop.el, 'How many residents appear as people. Money and score use the full population either way.'),
         note,
         h('p.tiny.muted', `Sheets bigger than ${Math.round(Math.sqrt(DEFAULTS.population.autoCapKm2))} km square are thinned so their final stage holds about ${fmtInt(DEFAULTS.population.autoCap)} people at 100%. This scale multiplies that too, up to ${fmtInt(DEFAULTS.sim.maxAgents)}: higher settings on a big sheet are at your own risk.`),
+        tog('thinCrowds', 'Thin crowds on big maps', `Off: every resident of a big sheet appears, up to ${fmtInt(FULL_CROWD_MAX)} people. A 10 km city can then run well below full speed.`),
         inGame ? h('p.tiny.faint', 'A new population scale applies from the next exercise.') : null),
       h('div.vstack.gap-4',
         tog('autoPauseOnOutbreak', 'Pause when the outbreak starts', 'Gives you a moment to read the map after READY.'),

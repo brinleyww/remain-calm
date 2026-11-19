@@ -9,7 +9,7 @@ import { serializeMap, parseMap, normalizeMap, mapStats } from '../map/format.js
 import { drawMinimap } from '../render/maprender.js';
 import { MUTATOR_PRESETS } from '../data/config.js';
 import { hashStr } from '../util/rng.js';
-import { popScaleMutator } from '../meta/settings.js';
+import { crowdMutators } from '../meta/settings.js';
 import { el, copyText, ensureEditorCss } from './editor_dom.js';
 
 const DIFFS = [['normal', 'Normal'], ['hardcore', 'Hardcore'], ['ultra', 'Ultra']];
@@ -417,7 +417,7 @@ export function openCoopLobby(container, opts = {}) {
     }
     B.append(el('p', { class: 'small', text: ready ? 'Both offices have the city. Start when ready; you will plan together and READY needs both of you.' : 'Send the city to your partner first.' }),
       el('button', { class: 'btn btn-primary btn-lg coop-start', type: 'button', dataset: { act: 'start' }, disabled: !ready, onclick: () => {
-        const b = briefMsg(), mutators = [popScaleMutator(), ...b.mutators];
+        const b = briefMsg(), mutators = [...crowdMutators(), ...b.mutators];
         S.link.send({ k: 'start', id: S.mapId, difficulty: b.difficulty, mutators });
         handOver({ difficulty: b.difficulty, mutators });
       } }, 'Begin operation'));

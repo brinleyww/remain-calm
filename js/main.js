@@ -1,5 +1,5 @@
 // Boot + screen manager: hash-routed menu screens, session launch and return, results -> progress.
-import { applyDisplaySettings, onSettingsChange, popScaleMutator, gamePalette } from './meta/settings.js';
+import { applyDisplaySettings, onSettingsChange, popScaleMutator, crowdMutators, gamePalette } from './meta/settings.js';
 import {
   recordResult, unlockedSet, freePlaySet, maxUpgradeLevel, setLoadout, getLoadout, setLastPlayed, markFlawless, getProgress,
 } from './meta/progress.js';
@@ -164,7 +164,7 @@ async function launchNow(opts) {
   const difficulty = opts.difficulty || 'normal';
   const startStage = Math.max(0, opts.startStage | 0);
   const userLines = (opts.mutators || []).filter(Boolean);
-  const mutators = mode === 'coop' ? userLines : [popScaleMutator(), ...userLines];
+  const mutators = mode === 'coop' ? userLines : [...crowdMutators(), ...userLines];
   const cfg = makeConfig(mutators, { difficulty, sandbox });
   const caps = stageCaps(map, startStage, cfg, difficulty, sandbox);
   const loadout = fitLoadout(opts.loadout || getLoadout(), { spCap: caps.sp, unlocked, cfg });

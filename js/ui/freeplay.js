@@ -4,7 +4,7 @@ import { mapStats, popLimit } from '../map/format.js';
 import { getItem, saveItem } from '../map/library.js';
 import { OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL } from '../map/osm.js';
 import { makeConfig } from '../data/config.js';
-import { getSettings } from '../meta/settings.js';
+import { getSettings, crowdMutators } from '../meta/settings.js';
 import { bestRecord, getLoadout, freePlaySet } from '../meta/progress.js';
 import { ALL_ITEMS } from '../map/campaign.js';
 import { h, append, clear, sfx, fmtInt, fmtMoney, toast, debounce, isTyping, keycap, openModal } from './dom.js';
@@ -177,7 +177,7 @@ export function mount(root, app, params) {
     estimate,
     h('div.orders-foot', scenBtn, startBtn));
 
-  function cfgNow() { return makeConfig(selectionLines(memo.sel), { difficulty: memo.difficulty, sandbox: memo.sandbox }); }
+  function cfgNow() { return makeConfig([...crowdMutators(), ...selectionLines(memo.sel)], { difficulty: memo.difficulty, sandbox: memo.sandbox }); }
 
   function updateOrders() {
     if (!ordersReady) return;

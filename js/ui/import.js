@@ -3,7 +3,8 @@ import { searchPlaces, IMPORT_RANGE, OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL, isHug
 import { cacheList, cacheKey } from '../map/osmcache.js';
 import { mapStats, popLimit } from '../map/format.js';
 import { saveItem } from '../map/library.js';
-import { getSettings } from '../meta/settings.js';
+import { getSettings, crowdMutators } from '../meta/settings.js';
+import { makeConfig } from '../data/config.js';
 import { h, clear, sfx, fmtInt, toast } from './dom.js';
 import { segControl, field, slider } from './screen.js';
 import { importArea } from './gen.js';
@@ -344,14 +345,15 @@ export function mountImport(container, { onMap }) {
     const stats = mapStats(m);
     const facts = mapFacts(m, stats);
     const popScale = getSettings().popScale;
-    const lim = popLimit(m);
-    const stage1 = civEstimate(stagePopulations(m)[0] || 0, popScale, undefined, lim.factor).n;
-    const civ = civEstimate(stats.nominalPop, popScale, undefined, lim.factor);
+    const ccfg = makeConfig(crowdMutators());
+    const lim = popLimit(m, ccfg);
+    const stage1 = civEstimate(stagePopulations(m)[0] || 0, popScale, ccfg, lim.factor).n;
+    const civ = civEstimate(stats.nominalPop, popScale, ccfg, lim.factor);
     facts.append(
       h('div.kv', h('span', 'Stage 1 residents'), h('i'), h('b', fmtInt(stage1))),
       h('div.kv', h('span', 'People simulated, final stage'), h('i'), h('b', fmtInt(civ.n) + (civ.capped ? ' (capped)' : ''))));
     factsBox.appendChild(facts);
-    if (lim.limited) factsBox.appendChild(h('p.tiny.muted', crowdLine(m, popScale) + '.'));
+    if (lim.limited) factsBox.appendChild(h('p.tiny.muted', crowdLine(m, popScale, ccfg) + '.'));
     if (res && res.info) {
       const i = res.info;
       sourceLine.textContent = res.source === 'cache' ? 'From this browser’s cache, fetched earlier. Download again for fresh data.'

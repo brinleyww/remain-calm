@@ -153,7 +153,7 @@ export class Session {
     const sandbox = o.mode === 'sandbox' || !!o.sandbox;
     const lines = [...(o.mutators || [])].filter(Boolean);
     const hasPop = lines.some((l) => typeof l === 'string' ? /^\s*population\.scale\s*=/.test(l) : Array.isArray(l) && l[0] === 'population.scale');
-    if (!hasPop && !this.net) lines.unshift(`population.scale=${+p.popScale.toFixed(3)}`);
+    if (!hasPop && !this.net) lines.unshift(`population.scale=${+p.popScale.toFixed(3)}`, ...(p.thinCrowds ? [] : ['population.autoCap=0', 'sim.maxAgents=500000']));
     const cfg = makeConfig(lines, { difficulty: o.difficulty, sandbox });
     const w = new World(this.map, { cfg, difficulty: o.difficulty, sandbox, owners: this.net ? 2 : 1, stage: o.startStage | 0, seed: o.seed });
     const unlocked = this.unlockFn();
